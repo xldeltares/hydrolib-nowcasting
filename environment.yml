@@ -1,0 +1,35 @@
+name: hydrolib-nowcasting
+
+channels:
+  - conda-forge
+
+
+dependencies:
+  - affine
+  - bottleneck
+  - click
+  - contextily
+  - dask=2021.4  # pin version because of AttributeError in 2021.5
+  - entrypoints
+  - flit>=3.2
+  - hydromt
+  - gdal>=3.1
+  - geopandas
+  - netcdf4
+  - networkx
+  - numba
+  - numpy
+  - matplotlib
+  - openpyxl
+  - pandas
+  - pyflwdir>=0.4.7
+  - pygeos>=0.8
+  - pygraphviz
+  - python>=3.8
+  - python-louvain
+  - rasterio
+  - requests
+  - rtree  # =0.9.3  issue with dll in newer vesions
+  - scipy
+  - xarray
+  - zarr
