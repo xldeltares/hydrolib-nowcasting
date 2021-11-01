@@ -61,21 +61,25 @@ class NowcastingModel(Model):
 
         # model specific
         self._graphmodel = None
-        self._subgraphmodel = None
 
     def setup_basemaps(
         self,
         region,
+        graph_class: str = "Graph",
         **kwargs,
     ):
         """Define the model region.
+
         Adds model layer:
         * **region** geom: model region
+
         Parameters
         ----------
         region: dict
             Dictionary describing region of interest, e.g. {'bbox': [xmin, ymin, xmax, ymax]}.
             See :py:meth:`~hydromt.workflows.parse_region()` for all options.
+        graph_class: str
+            Networkx Class names describing which class should be used for the graph model, e.g. ['Graph', 'DiGraph', 'MultiGraph', 'MultiDiGraph']
         """
 
         kind, region = hydromt.workflows.parse_region(region, logger=self.logger)
@@ -92,143 +96,131 @@ class NowcastingModel(Model):
         self.set_staticgeoms(geom, "region")
         # FIXME: how to deprecate WARNING:root:No staticmaps defined
 
-    def setup_branches(
+        # Set the grah model class
+        assert graph_class in [
+            "Graph",
+            "DiGraph",
+            "MultiGraph",
+            "MultiDiGraph",
+        ], "graph class not recongnised"
+        self._graphmodel = eval(f"nx.{graph_class}()")
+
+    def setup_edges(
         self,
-        branches_fn: str,
-        preprocess_branches: bool = False,
-        id_col: str = "branchId",
-        type_col: str = "branchType",
-        use_attributes: list = [],
+        edges_fn: str,
+        id_col: str,
+        attribute_cols: list = [],
+        use_location: bool = False,
         **kwargs,
     ):
-        """This component prepares the graph model with basic links
+        """This component add edges or edges attributes to the graph model
 
-        Adds model layers:
+        Adds model layers (use_location == True):
 
-        * **branches** geom: vector
+        * **edges** geom: vector
 
         Parameters
         ----------
-        branches_fn : str
-            Name of data source for branches parameters, see data/data_sources.yml.
-            * Required variables: [branchId, branchType]
-            * Optional variables: []
-        use_attributes : list
-            A list of the columns in the data source to be used as graph edges attributes.
-        """
-        self.logger.info(f"Preparing 1D branches.")
+        edges_fn : str
+            Name of data source for edges, see data/data_sources.yml.
+            * Required variables: [id_col]
+            * Optional variables: [attribute_cols]
+        id_col : str
+            Column that is converted into edge attributes using key: id
+        attribute_cols : str
+            Columns that are converted into edge attributes using the same key
 
-        if branches_fn is None:
-            logger.error("branches_fn must be specified.")
-
-        branches = self.data_catalog.get_geodataframe(
-            branches_fn,
-            geom=None,  # FIXME use geom region gives error "geopandas Invalid projection: : (Internal Proj Error: proj_create: unrecognized format / unknown name)"
-        )
-
-        # check if the branch has been preprocessed
-        if preprocess_branches == True:
-            raise NotImplementedError("branches must have been processed.")
-
-        self.logger.debug(f"Adding branches vector to staticgeoms.")
-        self.set_staticgeoms(branches, "branches")
-
-        self.logger.debug(f"Adding branches id and type to graph model.")
-        self._graphmodel = graph.create_graph_from_branches(branches, id_col=id_col)
-        self._graphmodel = graph.update_graph_edges_attributes(
-            self._graphmodel, attr_df=branches[[id_col, type_col]].set_index(id_col)
-        )
-        self._graphmodel_edgeidcol = id_col
-
-        if len(use_attributes) > 0:
-            self.logger.debug(
-                f"Adding additional branches attributes {use_attributes} to graph model."
-            )
-            self._graphmodel = graph.update_graph_edges_attributes(
-                self._graphmodel,
-                attr_df=branches[[id_col] + use_attributes].set_index(id_col),
-            )
-
-    def setup_structures(
-        self,
-        structures_fn: str,
-        preprocess_structures: bool = False,
-        id_col: str = "structId",
-        type_col: str = "structType",
-        use_attributes: list = [],
-        visualise: bool = False,
-        **kwargs,
-    ):
-        """This component prepares the graph with special links
-
-        Adds model layers:
-
-        * **structures** geom: vector
-
-        Parameters
+        Arguments
         ----------
-        structures_fn : str
-            Name of data source for structures parameters, see data/data_sources.yml.
-            * Required variables: [structureId, structureType]
-            * Optional variables: []
-        use_attributes : list
-            A list of the columns in the data source to be used as graph edges attributes.
+        use_location : bool
+            If True, the edges will be added; if False, only edges attributes are added.
+            Latter will be mapped to id.
+
         """
-        self.logger.info(f"Preparing 1D structures.")
 
-        if structures_fn is None:
-            logger.error("structures_fn must be specified.")
+        # parameter handling
+        if attribute_cols is None:
+            attribute_cols = []
 
-        structures = self.data_catalog.get_geodataframe(
-            structures_fn,
+        if edges_fn is None:
+            logger.error("edges_fn must be specified.")
+
+        self.logger.info(f"Adding edges to graph.")
+        edges = self._get_geodataframe(edges_fn)
+
+        assert set([id_col] + attribute_cols).issubset(
+            edges.columns
+        ), f"id and/or attribute cols do not exist in {edges.columns}"
+
+        if use_location is True:
+            self.logger.debug(f"Adding edges with id.")
+            self._graphmodel = graph.add_edges_with_id(
+                self._graphmodel, edges=edges, id_col=id_col
+            )
+
+        if len(attribute_cols) > 0:
+            self.logger.debug(f"updating edges attributes")
+            self._graphmodel = graph.update_edges_attributes(
+                self._graphmodel, edges=edges[[id_col] + attribute_cols], id_col=id_col
+            )
+
+        self.logger.debug(f"Adding edges vector to staticgeoms as {edges_fn}.")
+        self.set_staticgeoms(edges, edges_fn)
+
+    def _get_geodataframe(self, path_or_key: str) -> gpd.GeoDataFrame:
+        """Function to get geodataframe.
+
+        This function is a wrapper around :py:meth:`~hydromt.data_adapter.DataCatalog.get_geodataset`,
+        added support for updating columns based on funcs in yml
+
+        Arguments
+        ---------
+        path_or_key: str
+            Data catalog key. If a path to a vector file is provided it will be added
+            to the data_catalog with its based on the file basename without extension.
+
+        Returns
+        -------
+        gdf: geopandas.GeoDataFrame
+            GeoDataFrame
+
+        """
+
+        # read data
+        df = self.data_catalog.get_geodataframe(
+            path_or_key,
             geom=None,  # FIXME use geom region gives error "geopandas Invalid projection: : (Internal Proj Error: proj_create: unrecognized format / unknown name)"
         )
 
-        # check if the branch has been preprocessed
-        if preprocess_structures == True:
-            raise NotImplementedError("structures must have been processed.")
+        # update columns
+        funcs = None
+        try:
+            funcs = self.data_catalog.to_dict(path_or_key)[path_or_key]["kwargs"][
+                "funcs"
+            ]
+        except:
+            pass
 
-        self.logger.debug(f"Adding structures vector to staticgeoms.")
-        if "structures" in self.staticgeoms:
-            _structures = self.staticgeoms["structures"]
-            structures = gpd.GeoDataFrame(
-                pd.concat([_structures, structures]).drop_duplicates()
-            )
-            self.set_staticgeoms(structures, "structures")
+        if funcs is not None:
+            self.logger.debug(f"updating {path_or_key}")
 
-        else:
-            self.set_staticgeoms(structures, "structures")
+            for k, v in funcs.items():
+                try:
+                    df[k] = df.eval(v)
+                    self.logger.debug(f"update column {k} based on {v}")
+                except:
+                    self.logger.debug(f"can not update column {k} based on {v}")
 
-        # check if graph model exist
-        if self._graphmodel is None:
-            raise ValueError(
-                "graph model does not exist. Set up graph model using branches first"
-            )
-
-        self.logger.debug(f"Adding structures id and type to graph edges.")
-        edge_id_col = self._graphmodel_edgeidcol
-        self._graphmodel = graph.update_graph_edges_attributes(
-            self._graphmodel,
-            attr_df=structures[[edge_id_col, id_col, type_col]].set_index(edge_id_col),
-        )
-
-        if len(use_attributes) > 0:
-            self.logger.debug(
-                f"Adding additional structure attributes {use_attributes} to graph model."
-            )
-            self._graphmodel = graph.update_graph_edges_attributes(
-                self._graphmodel,
-                attr_df=structures[[edge_id_col] + use_attributes].set_index(
-                    edge_id_col
-                ),
-            )
-
-        if visualise == True:
-            f1, f2 = graph.plot_graph(self._graphmodel)
-            f1[1].set_title("graphmodel")
+        return df
 
     def setup_subgraph(
-        self, edge_query: str = None, node_query: str = None, visualise: bool = False, **kwargs
+        self,
+        subgraph_fn: str = "subgraph",
+        edge_query: str = None,
+        node_query: str = None,
+        ensure_connectivity: bool = False,
+        visualise: bool = False,
+        **kwargs,
     ) -> nx.Graph:
         """This component prepares the subgraph from a graph
 
@@ -236,32 +228,37 @@ class NowcastingModel(Model):
 
         Parameters
         ----------
+        name : str
+            Name of the subgraph. Used in staticgeom and model writers
         edge_query : str
             Conditions to query the subgraph from graph. Applies on existing attributes of edges, so make sure to add the attributes first.
         """
 
         if edge_query is None:
-            self.logger.debug(f"Use graph for subgraph")
+            self.logger.debug(f"use graph for subgraph")
             self._subgraphmodel = self._graphmodel
+        else:
+            self.logger.debug(f"query graph based on edge_query {edge_query}")
+            SG = graph.query_graph_edges_attributes(
+                self._graphmodel,
+                id_col="id",
+                edge_query=edge_query,
+            )
+            self.logger.debug(
+                f"{len(SG.edges())}/{len(self._graphmodel.edges())} edges are selected"
+            )
+            self._subgraphmodel = SG
 
-        self.logger.debug(f"query graph based on edge_query {edge_query}")
-        SG = graph.query_graph_edges_attributes(
-            self._graphmodel, id_col=self._graphmodel_edgeidcol, edge_query=edge_query
-        )
-        self.logger.debug(
-            f"{len(SG.edges())}/{len(self._graphmodel.edges())} edges are selected"
-        )
-
-        self._subgraphmodel = SG
+        #   FIXME: add node query
 
         # visualise
         if visualise == True:
-            f1,f2 = graph.plot_graph(self._subgraphmodel)
+            f1, f2 = graph.plot_graph(self._subgraphmodel)
             f1[1].set_title("subgraphmodel")
 
-
-
-    def setup_partition(self, algorithm: str = "simple", visualise: bool = False, **kwargs):
+    def setup_partition(
+        self, algorithm: str = "simple", visualise: bool = False, **kwargs
+    ):
         """This component prepares the partition from subgraph
 
         in progress
@@ -288,17 +285,21 @@ class NowcastingModel(Model):
         # UG
         # further partition
         partition = {n: -1 for n in UG.nodes}
-        if algorithm == 'simple': # based on connected subgraphs
-            for i,ig in enumerate(nx.connected_components(UG)):
-                partition.update({n:i for n in ig})
-        elif algorithm == 'louvain': # based on louvain algorithm
+        if algorithm == "simple":  # based on connected subgraphs
+            for i, ig in enumerate(nx.connected_components(UG)):
+                partition.update({n: i for n in ig})
+        elif algorithm == "louvain":  # based on louvain algorithm
             partition.update(community.best_partition(UG))
         else:
-            raise ValueError(f'{algorithm} is not recognised. allowed algorithms: simple, louvain')
+            raise ValueError(
+                f"{algorithm} is not recognised. allowed algorithms: simple, louvain"
+            )
 
         # finish partition
         n_partitions = max(partition.values())
-        self.logger.debug(f'{n_partitions} partitions is derived from subgraph using {algorithm} algorithm')
+        self.logger.debug(
+            f"{n_partitions} partitions is derived from subgraph using {algorithm} algorithm"
+        )
         # edges_partitions = {(s, t): partition[s] for s, t in G.edges() if partition[s] == partition[t]}
 
         # induced graph from the partitions
@@ -306,7 +307,6 @@ class NowcastingModel(Model):
         ind.remove_edges_from(nx.selfloop_edges(ind))
         # pos = nx.spring_layout(ind)
         # pos = nx.drawing.nx_agraph.pygraphviz_layout(ind, prog='dot', args='')
-
 
         # visualise
         if visualise == True:
@@ -321,34 +321,31 @@ class NowcastingModel(Model):
 
             # partitions
             plt.figure(figsize=(8, 8))
-            plt.title(f'partitions')
+            plt.title(f"partitions")
             plt.axis("off")
             nx.draw_networkx_nodes(
                 SG,
-                pos = pos_SG,
+                pos=pos_SG,
                 node_size=30,
                 cmap=plt.cm.RdYlBu,
                 node_color=list(partition.values()),
             )
             nx.draw_networkx_edges(SG, pos_SG, alpha=0.3)
             # add DIFF
-            nx.draw_networkx_nodes(DIFF, pos=pos_DIFF, node_size=10, node_color = 'k')
-            nx.draw_networkx_edges(DIFF, pos=pos_DIFF, edge_color='k', arrows = False)
+            nx.draw_networkx_nodes(DIFF, pos=pos_DIFF, node_size=10, node_color="k")
+            nx.draw_networkx_edges(DIFF, pos=pos_DIFF, edge_color="k", arrows=False)
 
             # induced partition graph
             plt.figure(figsize=(8, 8))
-            plt.title(f'Induced graph from partitions')
+            plt.title(f"Induced graph from partitions")
             plt.axis("off")
             nx.draw_networkx_nodes(
-                ind,
-                pos = pos_ind,
-                node_size=30, cmap=plt.cm.RdYlBu, node_color=list(ind)
+                ind, pos=pos_ind, node_size=30, cmap=plt.cm.RdYlBu, node_color=list(ind)
             )
             nx.draw_networkx_edges(ind, pos_ind, alpha=0.3)
             # add DIFF
-            nx.draw_networkx_nodes(DIFF, pos=pos_DIFF, node_size=10, node_color = 'k')
-            nx.draw_networkx_edges(DIFF, pos=pos_DIFF, edge_color='k', arrows = False)
-
+            nx.draw_networkx_nodes(DIFF, pos=pos_DIFF, node_size=10, node_color="k")
+            nx.draw_networkx_edges(DIFF, pos=pos_DIFF, edge_color="k", arrows=False)
 
     ## I/O
     def read(self):
@@ -427,16 +424,16 @@ class NowcastingModel(Model):
         # IO
         from matplotlib.backends.backend_pdf import PdfPages
         import matplotlib.pyplot as plt
+
         def multipage(filename, figs=None, dpi=200):
             pp = PdfPages(filename)
             if figs is None:
                 figs = [plt.figure(n) for n in plt.get_fignums()]
             for fig in figs:
-                fig.savefig(pp, format='pdf')
+                fig.savefig(pp, format="pdf")
             pp.close()
-        multipage(join(self.root, "graph", 'graphmodel.pdf'))
 
-
+        multipage(join(self.root, "graph", "graphmodel.pdf"))
 
     def read_forcing(self):
         """Read forcing at <root/?/> and parse to dict of xr.DataArray"""

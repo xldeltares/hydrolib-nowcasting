@@ -17,36 +17,36 @@ logger = logging.getLogger(__name__)
 __all__ = []
 
 
-def create_graph_from_branches(
-    branches: gpd.GeoDataFrame, id_col: str = "branchId"
-) -> nx.Graph():
-    """This function creates the graph by adding edges.
-    Result graph has coordinates as nodes"""
+def add_edges_with_id(G: nx.Graph, edges: gpd.GeoDataFrame, id_col: str) -> nx.Graph():
+    """Return graph with edges and edges ids"""
 
-    G = nx.DiGraph()
-
-    for index, row in branches.iterrows():
+    for index, row in edges.iterrows():
         from_node = row.geometry.coords[0]
         to_node = row.geometry.coords[-1]
 
-        G.add_edge(from_node, to_node, **{id_col: row[id_col]})
+        G.add_edge(from_node, to_node, id=row[id_col])
 
     return G
 
 
-def update_graph_edges_attributes(
-    G: nx.Graph, id_col: str = "branchId", attr_df: dict = {}
+def update_edges_attributes(
+    G: nx.Graph,
+    edges: gpd.GeoDataFrame,
+    id_col: str,
 ) -> nx.Graph():
-    """This function updates the graph by adding new edges attributes specified in attr_df"""
+    """This function updates the graph by adding new edges attributes specified in edges"""
 
     # graph df
-    _graph_df = nx.to_pandas_edgelist(G).set_index(id_col)
+    _graph_df = nx.to_pandas_edgelist(G).set_index("id")
 
     # check if edges id in attribute df
-    if attr_df.index.name == id_col:
-        graph_df = _graph_df.join(attr_df)
-    elif id_col in attr_df.columns:
-        graph_df = _graph_df.join(attr_df.set_index(id_col))
+    if edges.index.name == id_col:
+        edges.index.name = "id"
+        graph_df = _graph_df.join(edges)
+    elif id_col in edges.columns:
+        edges = edges.set_index(id_col)
+        edges.index.name = "id"
+        graph_df = _graph_df.join(edges)
     else:
         raise ValueError(
             "attributes could not be updated to graph: could not perform join"
@@ -63,7 +63,7 @@ def update_graph_edges_attributes(
     return G_updated
 
 
-def query_graph_edges_attributes(G, id_col: str = "branchId", edge_query: str = None):
+def query_graph_edges_attributes(G, id_col: str = "id", edge_query: str = None):
     """This function queries the graph by selecting only the edges specified in edge_query"""
 
     if edge_query is None:
