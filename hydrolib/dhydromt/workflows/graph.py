@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = []
 
+# create graph
+
 
 def add_edges_with_id(G: nx.Graph, edges: gpd.GeoDataFrame, id_col: str) -> nx.Graph():
     """Return graph with edges and edges ids"""
@@ -63,6 +65,9 @@ def update_edges_attributes(
     return G_updated
 
 
+# extract/contract graph
+
+
 def query_graph_edges_attributes(G, id_col: str = "id", edge_query: str = None):
     """This function queries the graph by selecting only the edges specified in edge_query"""
 
@@ -85,6 +90,24 @@ def query_graph_edges_attributes(G, id_col: str = "id", edge_query: str = None):
             raise ValueError("edges_query results in nothing left")
 
     return G_query
+
+
+def contract_graph_nodes(G, nodes):
+    """This function contract the nodes into one node in G"""
+
+    G_contracted = G.copy()
+    node_contracted = []
+
+    if len(nodes) > 1:
+        nodes = sorted(nodes)
+        node_contracted.append(nodes[0])
+        for node in nodes[1:]:
+            G_contracted = nx.contracted_nodes(G_contracted, nodes[0], node)
+
+    return G_contracted, node_contracted
+
+
+# plot graph
 
 
 def make_graphplot_for_targetnodes(
@@ -158,6 +181,40 @@ def make_graphplot_for_targetnodes(
     return fig, ax
 
 
+def plot_xy(G: nx.DiGraph):
+    plt.figure(figsize=(8, 8))
+    plt.axis("off")
+    pos_G = {xy: xy for xy in G.nodes()}
+    nx.draw_networkx_nodes(G, pos=pos_G, node_size=10, node_color="k")
+    nx.draw_networkx_edges(G, pos=pos_G, edge_color="k", arrows=False)
+    return
+
+
+def plot_graphviz(G: nx.DiGraph):
+
+    """This function makes plots for grahviz layout"""
+
+    # convert to undirected graph
+    UG = G.to_undirected()
+
+    # find connected components in undirected graph
+    outlets = []
+    for i, SG in enumerate(nx.connected_components(UG)):
+        # make components a subgraph
+        SG = G.subgraph(SG)
+
+        # find outlets of the subgraph
+        outlets.append([n for n in SG.nodes() if G.out_degree(n) == 0])
+
+    outlets = sum(outlets, [])
+    outlet_ids = {}
+
+    fig1, ax1 = make_graphplot_for_targetnodes(
+        G, outlets, outlet_ids, layout="graphviz"
+    )
+    return (fig1, ax1)
+
+
 def plot_graph(G: nx.DiGraph):
     """This function makes plots for two different layout"""
 
@@ -193,6 +250,9 @@ def random_color():
             random.randint(0, 255) / 255,
         ]
     )
+
+
+# validate graph - old
 
 
 def validate_1dnetwork_connectivity(
