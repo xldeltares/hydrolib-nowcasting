@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = []
 
+
 # IO
 def multipage(filename, figs=None, dpi=200):
     pp = PdfPages(filename)

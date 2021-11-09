@@ -22,7 +22,6 @@ from hydromt import raster
 from .workflows import *
 from . import DATADIR
 
-
 __all__ = ["NowcastingModel"]
 logger = logging.getLogger(__name__)
 
@@ -39,13 +38,14 @@ class NowcastingModel(Model):
     _FOLDERS = ["graph", "staticgeoms"]
 
     def __init__(
-        self,
-        root=None,
-        mode="w",
-        config_fn=None,  # hydromt config contain glob section, anything needed can be added here as args
-        data_libs=None,  # yml # TODO: how to choose global mapping files (.csv) and project specific mapping files (.csv)
-        logger=logger,
-        deltares_data=False,  # data from pdrive
+            self,
+            root=None,
+            mode="w",
+            config_fn=None,  # hydromt config contain glob section, anything needed can be added here as args
+            data_libs=None,
+            # yml # TODO: how to choose global mapping files (.csv) and project specific mapping files (.csv)
+            logger=logger,
+            deltares_data=False,  # data from pdrive
     ):
 
         if not isinstance(root, (str, Path)):
@@ -65,12 +65,13 @@ class NowcastingModel(Model):
         self._subgraphmodels = {}
 
     def setup_basemaps(
-        self,
-        region,
-        graph_class: str = "Graph",
-        **kwargs,
+            self,
+            region,
+            report: str = None,
+            **kwargs,
     ):
         """Define the model region.
+        and setup the base graph - with geometry and id
 
         Adds model layer:
         * **region** geom: model region
@@ -80,8 +81,8 @@ class NowcastingModel(Model):
         region: dict
             Dictionary describing region of interest, e.g. {'bbox': [xmin, ymin, xmax, ymax]}.
             See :py:meth:`~hydromt.workflows.parse_region()` for all options.
-        graph_class: str
-            Networkx Class names describing which class should be used for the graph model, e.g. ['Graph', 'DiGraph', 'MultiGraph', 'MultiDiGraph']
+        **kwargs
+            Keyword arguments passed to _setup_graph(**kwargs)
         """
 
         kind, region = hydromt.workflows.parse_region(region, logger=self.logger)
@@ -98,7 +99,46 @@ class NowcastingModel(Model):
         self.set_staticgeoms(geom, "region")
         # FIXME: how to deprecate WARNING:root:No staticmaps defined
 
+        if report:
+            plt.figure(figsize=(8, 8))
+            plt.axis("off")
+            plt.title(report, wrap=True, loc="left")
+
+    def setup_graph(
+            self,
+            graph_class: str,
+            edges_fn: str = None,
+            edges_id_col: str = None,
+            nodes_fn: str = None,
+            nodes_id_col: str = None,
+            report: str = None,
+            **kwargs,
+    ):
+
+        """Setup the graph - with geometry and id
+
+        Parameters
+        ----------
+        graph_class: str
+            Class in networkx for creating the graph.
+        edges_fn: str
+            Name of the edges shp file specified in data yml.
+        edges_id_col: str
+            Columns name used in the shp file as the id of edges.
+        nodes_fn: str Not Implemented
+            Name of the nodes shp file specified in data yml.
+        nodes_id_col: str Not Implemented
+            Columns name used in the shp file as the id of nodes.
+
+        Notes
+        ----------
+        This function can only be called once
+        """
+
         # Set the graph model class
+        if self._graphmodel:
+            raise ValueError("graph model can only be created once. Remove duplicated [setup_graph] section. ")
+
         assert graph_class in [
             "Graph",
             "DiGraph",
@@ -107,17 +147,28 @@ class NowcastingModel(Model):
         ], "graph class not recognised"
         self._graphmodel = eval(f"nx.{graph_class}()")
 
-    def setup_edges(
-        self,
-        edges_fn: str,
-        id_col: str,
-        attribute_cols: list = [],
-        use_location: bool = False,
-        **kwargs,
+        if edges_fn is not None and edges_id_col is not None:
+            self._setup_edges(edges_fn=edges_fn, id_col=edges_id_col, use_location=True)
+
+        if nodes_fn is not None and nodes_id_col is not None:
+            raise NotImplementedError(
+                "assigning nodes to graph model is  not yet implemented"
+            )
+
+        if report:
+            G = self._graphmodel
+            graph.plot_xy(G)
+            plt.title(report, wrap=True, loc="left")
+
+    def _setup_edges(
+            self,
+            edges_fn: str,
+            id_col: str,
+            attribute_cols: list = None,
+            use_location: bool = False,
+            **kwargs,
     ):
         """This component add edges or edges attributes to the graph model
-
-        Adds model layers (use_location == True):
 
         * **edges** geom: vector
 
@@ -142,7 +193,7 @@ class NowcastingModel(Model):
 
         # parameter handling
         if attribute_cols is None:
-            attribute_cols = []
+            attribute_cols = ["geometry"]
 
         if edges_fn is None:
             logger.error("edges_fn must be specified.")
@@ -169,6 +220,15 @@ class NowcastingModel(Model):
         self.logger.debug(f"Adding edges vector to staticgeoms as {edges_fn}.")
         self.set_staticgeoms(edges, edges_fn)
 
+    def _setup_nodes(self, **kwargs):
+        """This component add nodes or nodes attributes to the graph model
+
+        * **nodes** geom: vector
+
+        raise NotImplementedError
+        """
+        raise NotImplementedError
+
     def _get_geodataframe(self, path_or_key: str) -> gpd.GeoDataFrame:
         """Function to get geodataframe.
 
@@ -191,7 +251,8 @@ class NowcastingModel(Model):
         # read data
         df = self.data_catalog.get_geodataframe(
             path_or_key,
-            geom=None,  # FIXME use geom region gives error "geopandas Invalid projection: : (Internal Proj Error: proj_create: unrecognized format / unknown name)"
+            geom=None,
+            # FIXME use geom region gives error "geopandas Invalid projection: : (Internal Proj Error: proj_create: unrecognized format / unknown name)"
         )
 
         # update columns
@@ -208,24 +269,64 @@ class NowcastingModel(Model):
 
             for k, v in funcs.items():
                 try:
+                    # eval funcs for columns that exist
                     if "geometry" in v:
                         # ensure type of geoseries - might be a bug in pandas / geopandas
                         _ = type(df["geometry"])
                     df[k] = df.eval(v)
                     self.logger.debug(f"update column {k} based on {v}")
-                except Exception as e:
-                    self.logger.debug(f"can not update column {k} based on {v}: {e}")
+                except:
+                    try:
+                        # assign new columns
+                        df[k] = v
+                        self.logger.debug(f"update column {k} based on {v}")
+                    except Exception as e:
+                        self.logger.debug(f"can not update column {k} based on {v}: {e}")
+
+        # post processing
+        df = df.drop_duplicates()
+        self.logger.debug(f"drop duplicates in dataframe")
 
         return df
 
+    def update_edges(
+            self, edges_fn: str, id_col: str, attribute_cols: list = None, **kwargs
+    ):
+        """This component update edges attributes to the graph model
+
+        Parameters
+        ----------
+        edges_fn : str
+            Name of data source for edges, see data/data_sources.yml.
+            * Required variables: [id_col]
+            * Optional variables: [attribute_cols]
+        id_col : str
+            Column that is converted into edge attributes using key: id
+        attribute_cols : str
+            Columns that are converted into edge attributes using the same key
+
+        See Also
+        --------
+        _setup_edges
+        """
+
+        self._setup_edges(
+            edges_fn=edges_fn,
+            id_col=id_col,
+            attribute_cols=attribute_cols,
+            use_location=False,
+        )
+
     def setup_subgraph(
-        self,
-        subgraph_fn: str = "subgraph",
-        edge_query: str = None,
-        node_query: str = None,
-        algorithm: int = 0,
-        visualise: bool = False,
-        **kwargs,
+            self,
+            subgraph_fn: str = None,
+            edge_query: str = None,
+            node_query: str = None,
+            algorithm: str = None,
+            targets=None,
+            weight: str = None,
+            report: str = None,
+            **kwargs,
     ):
         """This component prepares the subgraph from a graph
 
@@ -234,145 +335,172 @@ class NowcastingModel(Model):
         Parameters
         ----------
         subgraph_fn : str
-            Name of the subgraph. Used in staticgeom and model writers
-
+            Name of the subgraph instance.
+            If None, the function will update the self._graphmodel
+            if String and new, the function will create the instance in self._subgraphmodels
+            if String and old, the function will update the instance in self._subgraphmodels
         Arguments
         ----------
         edge_query : str
             Conditions to query the subgraph from graph.
             Applies on existing attributes of edges, so make sure to add the attributes first.
-        algorithm : str
-            Methods to ensure connectivity of the resulting subgraph, e.g. 0,1,2,3,4
-            Methods in testing:
-            0. do not apply any method - disconnected subgraph
-            1. patch paths from queried nodes in SG to an signed outlet
-            2. steine rtree approximation for nodes in SG (weight = simple distance)
-            3. steine rtree approximation for nodes in SG (weight = queried importance)
-            4. steine rtree approximation for nodes in SG (weight = geometry distance)
+        algorithm : str = None
+            Algorithms to apply addtional processing on subgraph.
+            Supported options: 'patch', 'mst', 'dag'.
+            If None, do not apply any method - disconnected subgraph
+            If "patch", patch paths from queried nodes in SG to an signed outlet
+            if "mst", steiner tree approximation for nodes in SG
+            if "dag" dijkstra shortest length resulted Directed Acyclic Graphs (DAG)
             # FIXME: add weight as argument; combine setup_dag function
+        weight : str = None
 
         """
 
-        if edge_query is None:
-            self.logger.debug(f"use graph for subgraph")
-            SG = self._graphmodel
+        # check input parameter and arguments
+        if subgraph_fn in self._subgraphmodels:
+            self.logger.warning(f"subgraph instance {subgraph_fn} already exist, apply setup_subgraph on subgraph_fn and overwrite.")
+            G = self._subgraphmodels[subgraph_fn].copy()
+        elif subgraph_fn:
+            self.logger.debug(f"subgraph instance {subgraph_fn} will be created")
+            G = self._graphmodel.copy()
         else:
-            self.logger.debug(f"query subgraph based on edge_query {edge_query}")
+            self.logger.debug(f"graph will be updated.")
+            G = self._graphmodel.copy()
+
+        if edge_query is None:
+            SG = G
+        else:
+            self.logger.debug(f"query sedges: {edge_query}")
             SG = graph.query_graph_edges_attributes(
-                self._graphmodel,
+                G,
                 id_col="id",
                 edge_query=edge_query,
             )
             self.logger.debug(
-                f"{len(SG.edges())}/{len(self._graphmodel.edges())} edges are selected"
+                f"{len(SG.edges())}/{len(G.edges())} edges are selected"
             )
 
-        self._subgraphmodels[subgraph_fn] = SG
-        nodes = [n for n in self._subgraphmodels[subgraph_fn].nodes]
+        # FIXME: add node query
+        if algorithm is not None:
+            if algorithm not in ("patch", "mst", "dag"):
+                raise ValueError(f"algorithm not supported: {algorithm}")
 
-        #   FIXME: add node query
+        if targets is None:
+            targets = [n for n in SG.nodes if SG.out_degree[n] == 0]
+        elif isinstance(targets, str):
+            try:
+                _target_G = graph.query_graph_edges_attributes(
+                    SG,
+                    edge_query=targets,
+                )
+                SG, targets = graph.contract_graph_nodes(SG, _target_G.nodes)
+            except:
+                pass
+        elif isinstance(targets, list):
+            assert set(targets).issubset(set(SG.nodes)), "targets must be the nodes id"
+        self.logger.debug(f"target are {targets}")
 
+        if weight is not None:
+            assert weight in list(SG.edges(data=True))[0][2].keys(), f"edge weight {weight} does not exist!"
+
+        # start making subgraph
+        G = self._graphmodel.copy()
+        UG = G.to_undirected()
+        SG = SG.copy()
+
+        # apply additional algorithm
         # TODO: how to query a subset of edges yet retain the connectivity of the network?
-        if algorithm == 0:
-            # 0. do not apply any method - disconnected subgraph
-            self.logger.debug(f"do not apply any method - disconnected subgraph")
+        if algorithm is None:
+            #  do not apply any method - disconnected subgraph
             pass
 
-        elif algorithm == 1:
-            # 1. patch paths from queried nodes in SG to an signed outlet
+        elif algorithm == "patch":
+            # patch paths from queried nodes in SG to an signed outlet
             self.logger.debug(
-                f"patch paths from queried nodes in SG to an signed outlet"
+                f"patch paths from SG nodes to targets"
             )
-            G = self._graphmodel.copy()
-            SG = self._subgraphmodels[subgraph_fn].copy()
-            # FIXME hard coded outlet
-            outlet = (662779.7744999994, 1524628.4437000006)
-            i = 0
-            for n in nodes:
-                if nx.has_path(SG, n, outlet):
-                    pass
-                elif nx.has_path(G, n, outlet):  # directional path exist
-                    nx.add_path(SG, nx.dijkstra_path(G, n, outlet))
-                if nx.has_path(
-                    G.to_undirected(), n, outlet
-                ):  # unidirectional path exist
-                    nx.add_path(SG, nx.dijkstra_path(G.to_undirected(), n, outlet))
-                else:
-                    i += 1
-                    print(f"No path to {outlet}")
-            self._subgraphmodels[subgraph_fn] = SG
 
-        elif algorithm == 2:
-            # 2. steine rtree approximation for nodes in SG (weight = simple distance)
+            SG_nodes = list(SG.nodes)
+            for outlet in targets:
+                for n in SG_nodes:
+                    if nx.has_path(SG, n, outlet):
+                        pass
+                    elif nx.has_path(G, n, outlet):  # directional path exist
+                        nx.add_path(SG, nx.dijkstra_path(G, n, outlet))
+                    if nx.has_path(
+                            UG, n, outlet
+                    ):  # unidirectional path exist
+                        nx.add_path(SG, nx.dijkstra_path(UG, n, outlet))
+                    else:
+                        print(f"No path to {outlet}")
+
+        elif algorithm == "mst":
+            # minimum spanning tree
             self.logger.debug(
-                f"steine rtree approximation for nodes in SG (weight = simple distance)"
+                f"steine rtree approximation for SG nodes using weight {weight}"
             )
-            G = self._graphmodel.copy()
-            SG = self._subgraphmodels[subgraph_fn].copy()
-            e = {(u, v): {"weight": 1} for u, v in G.edges()}
-            G = nx.Graph()
-            G.add_edges_from(e)
-            SG = nx.algorithms.approximation.steinertree.steiner_tree(G, nodes)
-            self._subgraphmodels[subgraph_fn] = SG
+            targets = None
+            SG_nodes = list(SG.nodes)
+            SG = nx.algorithms.approximation.steinertree.steiner_tree(UG, SG_nodes, weight=weight)
 
-        elif algorithm == 3:
-            # 3. steine rtree approximation for nodes in SG (weight = queried importance)
+        elif algorithm == 'dag':
+            # dag
             self.logger.debug(
-                f"steine rtree approximation for nodes in SG (weight = queried importance)"
+                f"creating dag from SG nodes to targets"
             )
-            G = self._graphmodel.copy()
-            SG = self._subgraphmodels[subgraph_fn].copy()
-            e = {(u, v): {"weight": 0} for u, v in G.edges()}
-            e.update({(u, v): {"weight": 1000} for u, v in SG.edges()})
-            G = nx.Graph()
-            G.add_edges_from(e)
-            SG = nx.algorithms.approximation.steinertree.steiner_tree(G, nodes)
-            self._subgraphmodels[subgraph_fn] = SG
+            SG = self._setup_dag(SG, targets=targets, weight=weight)
 
-        elif algorithm == 4:
-            # 4. steine rtree approximation for nodes in SG (weight = geometry distance)
-            self.logger.debug(
-                f"steine rtree approximation for nodes in SG (weight = geometry distance)"
+        # assign SG
+        if subgraph_fn:
+            self._subgraphmodels[subgraph_fn] = SG
+            nx.set_edge_attributes(
+                self._subgraphmodels[subgraph_fn], values=True, name=subgraph_fn
             )
-            G = self._graphmodel.copy()
-            SG = self._subgraphmodels[subgraph_fn].copy()
-            e = {(u, v): {"weight": d["geom_length"]} for u, v, d in G.edges(data=True)}
-            G = nx.Graph()
-            G.add_edges_from(e)
-            SG = nx.algorithms.approximation.steinertree.steiner_tree(G, nodes)
-            self._subgraphmodels[subgraph_fn] = SG
+            # add subgraph_fn as attribute in the G
+            nx.set_edge_attributes(
+                self._graphmodel,
+                {e: {subgraph_fn: True} for e in self._subgraphmodels[subgraph_fn].edges()},
+            )
+        else:
+            self._graphmodel = SG
 
-        # add marker/tracer of the subgraph
-        nx.set_edge_attributes(
-            self._subgraphmodels[subgraph_fn], values=True, name=subgraph_fn
-        )
-        nx.set_edge_attributes(self._graphmodel, values=True, name=subgraph_fn)
+        # report
+        if report:
 
-        # visualise
-        if visualise == True:
+            # plot graphviz
+            graph.make_graphplot_for_targetnodes(SG, targets, layout='graphviz')
+            plt.title(report, wrap=True, loc="left")
 
-            G = self._graphmodel.copy()
-            SG = self._subgraphmodels[subgraph_fn].copy()
+            # plot xy
             plt.figure(figsize=(8, 8))
-            plt.title(
-                f"Subgraph in red: subgraph_fn = {subgraph_fn}; algorithm = {algorithm}"
-            )
+            plt.title(report, wrap=True, loc="left")
             plt.axis("off")
-            pos_G = {xy: xy for xy in G.nodes()}
-            nx.draw_networkx_nodes(G, pos=pos_G, node_size=10, node_color="k")
-            nx.draw_networkx_edges(G, pos=pos_G, edge_color="k", arrows=False)
-            pos_SG = {xy: xy for xy in SG.nodes()}
-            nx.draw_networkx_nodes(SG, pos=pos_SG, node_size=10, node_color="r")
-            nx.draw_networkx_edges(SG, pos=pos_SG, edge_color="r", arrows=False)
+            pos = {xy: xy for xy in G.nodes()}
 
-    def setup_dag(
-        self,
-        subgraph_fn: str = None,
-        target_query: str = None,
-        weight: str = None,
-        algorithm: str = "dijkstra",
-        visualise: bool = False,
-        **kwargs,
+            # base
+            nx.draw(G, pos=pos, node_size=0, with_labels=False, arrows=False, node_color='gray',
+                    edge_color='silver',
+                    width=1)
+            # SG nodes and edges
+            if algorithm == 'dag':
+                nx.draw_networkx_nodes(G, pos=pos, nodelist=targets, node_size=50, node_shape="*", node_color='r')
+                edge_width = [d[2] / 100 for d in SG.edges(data="nnodes_upstream")]
+                nx.draw_networkx_edges(SG, pos=pos, edgelist=SG.edges(), arrows=False,
+                                       width=[float(i) / (max(edge_width) + 0.1) * 20 + 0.5 for i in edge_width])
+            else:
+                edge_width = [0 / 100 for d in SG.edges()]
+                nx.draw_networkx_edges(SG, pos=pos, edgelist=SG.edges(), arrows=False,
+                                       width=[float(i) / (max(edge_width) + 0.1) * 20 + 0.5 for i in edge_width])
+
+
+    def _setup_dag(
+            self,
+            G: nx.Graph = None,
+            targets=None,
+            weight: str = None,
+            algorithm: str = "dijkstra",
+            report: str = None,
+            **kwargs,
     ):
         """This component prepares subgraph as Directed Acyclic Graphs (dag) using shortest path
         step 1: add a supernode to subgraph (representing graph - subgraph)
@@ -382,13 +510,12 @@ class NowcastingModel(Model):
 
         Parameters
         ----------
-        subgraph_fn : string, optional (default = None)
-            Name of the subgraph to apply the method on.
-            If None, the full graph will be used.
-        target_query : None or string, optional (default = None)
-            Edges query used for creating super target.
+        G : nx.Graph
+        targets : None or String or list, optional (default = None)
+            DAG super targets.
             If None, a target node will be any node with out_degree == 0.
             If a string, use this to query part of graph as a super target node.
+            If a list, use targets as a list of target nodes.
         weight : None or string, optional (default = None)
             Weight used for shortest path.
             If None, every edge has weight/distance/cost 1.
@@ -403,49 +530,51 @@ class NowcastingModel(Model):
 
         """
 
-        # check input parameter and arguments
-        if subgraph_fn is None:
-            self.logger.debug(f"making dag for graph model")
-            G = self._graphmodel
-        elif subgraph_fn in self._subgraphmodels.keys():
-            self.logger.debug(f"making dag for {subgraph_fn} model")
-            G = self._subgraphmodels[subgraph_fn]
+        if G is not None:
+            if isinstance(G, nx.DiGraph):
+                G = G.to_undirected()
+            pass
         else:
-            raise ValueError(
-                f"{subgraph_fn} model does not exist. create one using [setup_subgraph]."
-            )
+            return G
 
-        if target_query is None:
+        if targets is None:
             targets = [n for n in G.nodes if G.out_degree[n] == 0]
-        else:
-            _target_G = graph.query_graph_edges_attributes(
-                G,
-                edge_query=target_query,
-            )
-            G, targets = graph.contract_graph_nodes(G, _target_G.nodes)
+        elif isinstance(targets, str):
+            try:
+                _target_G = graph.query_graph_edges_attributes(
+                    G,
+                    edge_query=targets,
+                )
+                G, targets = graph.contract_graph_nodes(G, _target_G.nodes)
+            except:
+                pass
+        elif isinstance(targets, list):
+            assert set(targets).issubset(set(G.nodes)), "targets must be the nodes id"
         self.logger.debug(f"target are {targets}")
 
-        if weight is None:
-            algorithm = "unweighted"
-
-        if algorithm not in ("dijkstra", "bellman-ford", "unweighted"):
+        if algorithm not in ("dijkstra", "bellman-ford"):
             raise ValueError(f"algorithm not supported: {algorithm}")
 
-        # started making dag
-        if isinstance(G, nx.DiGraph):
-            G = G.to_undirected()
 
+
+        # started making dag
         DAG = nx.DiGraph()
 
         # 1. add path
-        for t in targets:
-            for _ in nx.connected_components(G):
-                SG = G.subgraph(
-                    _
-                )  # FIXME: if dont do this step: networkx.exception.NetworkXNoPath: No path to **.
-                for n in SG.nodes:
-                    path = nx.shortest_path(SG, n, t, weight=weight)
+        for _ in nx.connected_components(G):
+            SG = G.subgraph(_).copy()
+            # add super target
+            _t = -1
+            SG.add_edges_from([(t, _t) for t in list(set(SG.nodes) & set(targets))])
+            # FIXME: if dont do this step: networkx.exception.NetworkXNoPath: No path to **.
+            for n in SG.nodes:
+                if n not in DAG:
+                    # gradient = n['streetlev'] - t['streetlev']
+                    path = nx.shortest_path(SG, n, _t, weight=weight, method=algorithm)
+                    # t_path = nx.single_source_dijkstra_path_length(SG, n, t
+                    #                                                weight=lambda u, v, e: (s['streetlev'] - t['streetlev'])/e['geom_length'])
                     nx.add_path(DAG, path)
+                    DAG.remove_node(_t)
 
         # 2. add back weights
         for u, v, new_d in DAG.edges(data=True):
@@ -456,22 +585,50 @@ class NowcastingModel(Model):
                 # add old weights to new weights if not in new data
                 new_d.update(dict((key, old_d[key]) for key in non_shared))
 
-        # visualise
-        if visualise == True:
-            # before remove target
-            graph.plot_xy(DAG)
-            plt.title(f"DAG: subgraph_fn =  {subgraph_fn}")
-            # after remove target
-            DAG.remove_nodes_from(targets)
-            graph.plot_xy(DAG)
-            plt.title(f"DAG: subgraph_fn =  {subgraph_fn}: remove targets")
+        # 3. add auxiliary calculations
+        _ = DAG.reverse()
+        for s, t in _.edges():
+            nnodes = len(list(nx.dfs_postorder_nodes(_, t)))
+            DAG[t][s].update({'nnodes_upstream': nnodes})
+
+        # validate DAG
+        if nx.is_directed_acyclic_graph(DAG):
+            self.logger.debug("dag is directed acyclic graph")
+        else:
+            self.logger.error("dag is NOT directed acyclic graph")
+
+        # visualise DAG
+        if report:
+
+            # plot graphviz
+            graph.make_graphplot_for_targetnodes(DAG, targets, layout='graphviz')
+            plt.title(report, wrap=True, loc="left")
+
+            # plot xy
+            plt.figure(figsize=(8, 8))
+            plt.axis("off")
+            plt.title(report)
+            pos = {xy: xy for xy in DAG.nodes()}
+            # base
+            nx.draw(G, pos=pos, node_size=0, with_labels=False, arrows=False, node_color='gray', edge_color='silver',
+                    width=1)
+            # nodes dag
+            nx.draw_networkx_nodes(G, pos=pos, nodelist=targets, node_size=50, node_shape="*", node_color='r')
+            # edges dag
+            edge_width = [d[2] / 100 for d in DAG.edges(data="nnodes_upstream")]
+            nx.draw_networkx_edges(DAG, pos=pos, edgelist=DAG.edges(), arrows=False,
+                                   width=[float(i) / (max(edge_width) + 0.1) * 20 + 0.5 for i in edge_width])
+            nx.draw_networkx_nodes(DAG, pos=pos, nodelist=targets, node_size=50, node_shape="*", node_color='r')
+
+        self._daggraphmodel = DAG
+        return DAG
 
     def setup_partition(
-        self,
-        subgraph_fn: str = "subgraph",
-        algorithm: str = "simple",
-        visualise: bool = False,
-        **kwargs,
+            self,
+            subgraph_fn: str = "subgraph",
+            algorithm: str = "simple",
+            report: str = None,
+            **kwargs,
     ):
         """This component prepares the partition from subgraph
 
@@ -491,18 +648,15 @@ class NowcastingModel(Model):
         import matplotlib.pyplot as plt
         import numpy as np
 
-        G = self._graphmodel
+        G = self._graphmodel.copy()
+        G_targets = [n for n in G.nodes if G .out_degree[n] == 0]
 
-        SG = self._subgraphmodels[subgraph_fn]
+        SG = self._subgraphmodels[subgraph_fn].copy()
+        SG_targets = [n for n in SG.nodes if SG.out_degree[n] == 0]
+
+        # UG for further partition
         UG = SG.to_undirected()
-
-        DIFF = G.copy()
-        DIFF.remove_edges_from(e for e in G.edges() if e in SG.edges())
-        DIFF.remove_nodes_from(list(nx.isolates(DIFF)))
-
-        # UG
-        # further partition
-        partition = {n: -1 for n in SG.nodes}
+        partition = {n: -1 for n in G.nodes}
         if algorithm == "simple":  # based on connected subgraphs
             for i, ig in enumerate(nx.connected_components(UG)):
                 partition.update({n: i for n in ig})
@@ -512,65 +666,67 @@ class NowcastingModel(Model):
             raise ValueError(
                 f"{algorithm} is not recognised. allowed algorithms: simple, louvain"
             )
-
-        # finish partition
         n_partitions = max(partition.values())
         self.logger.debug(
             f"{n_partitions} partitions is derived from subgraph using {algorithm} algorithm"
         )
         # edges_partitions = {(s, t): partition[s] for s, t in G.edges() if partition[s] == partition[t]}
 
-        # induced graph from the partitions
-        ind = community.induced_graph(partition, SG)
-        ind.remove_edges_from(nx.selfloop_edges(ind))
-        # pos = nx.spring_layout(ind)
-        # pos = nx.drawing.nx_agraph.pygraphviz_layout(ind, prog='dot', args='')
+        # induced graph from the partitions - faster but a bit confusing results
+        # ind = community.induced_graph(partition, G)
+        # ind.remove_edges_from(nx.selfloop_edges(ind))
+
+        # contracted graph - slower but neater
+        # use both G and SG
+        ind = G.copy()
+        for part in np.unique(list(partition.values())):
+            part_nodes = [n for n in partition if partition[n] == part]
+            if part == -1:
+                # do not contract
+                pass
+            else:
+                for to_node in [n for n in part_nodes if n in SG_targets]:
+                    ind, targets = graph.contract_graph_nodes(ind, part_nodes, to_node)
 
         # visualise
-        if visualise == True:
+        if report:
 
             # Cartesian coordinates centroid
+            pos_G = {xy: xy for xy in G.nodes()}
             pos_SG = {xy: xy for xy in SG.nodes()}
-            pos_ind = {}
-            for k, v in partition.items():
-                pos_ind.setdefault(v, []).append(k)
-            pos_ind = {k: np.mean(v, axis=0) for k, v in pos_ind.items()}
-            pos_DIFF = {xy: xy for xy in DIFF.nodes()}
+            pos_ind = {xy: xy for xy in ind.nodes()}
 
             # partitions
             plt.figure(figsize=(8, 8))
-            plt.title(
-                f"Partitions in color: subgraph_fn = {subgraph_fn}; algorithm = {algorithm}"
-            )
+            plt.title(report, wrap=True, loc="left")
             plt.axis("off")
-            # add DIFF
-            nx.draw_networkx_nodes(DIFF, pos=pos_DIFF, node_size=10, node_color="k")
-            nx.draw_networkx_edges(DIFF, pos=pos_DIFF, edge_color="k", arrows=False)
-
             nx.draw_networkx_nodes(
-                SG,
-                pos=pos_SG,
+                G,
+                pos=pos_G,
                 node_size=30,
                 cmap=plt.cm.RdYlBu,
                 node_color=list(partition.values()),
             )
-            nx.draw_networkx_edges(SG, pos_SG, alpha=0.3)
+            nx.draw_networkx_edges(G, pos_G, alpha=0.3)
 
             # induced partition graph
-            plt.figure(figsize=(8, 8))
-            plt.title(
-                f"Indiced graph from partitions in color: subgraph_fn = {subgraph_fn}; algorithm = {algorithm}"
+            graph.make_graphplot_for_targetnodes(
+                ind, None, None, layout="graphviz"
             )
+            plt.title(report, wrap=True, loc="left")
+
+            plt.figure(figsize=(8, 8))
+            plt.title(report, wrap=True, loc="left")
             plt.axis("off")
-
-            # add DIFF
-            nx.draw_networkx_nodes(DIFF, pos=pos_DIFF, node_size=10, node_color="k")
-            nx.draw_networkx_edges(DIFF, pos=pos_DIFF, edge_color="k", arrows=False)
-
+            # base
+            nx.draw(G, pos=pos_G, node_size=0, with_labels=False, arrows=False, node_color='gray', edge_color='silver',
+                    width=0.2)
             nx.draw_networkx_nodes(
-                ind, pos=pos_ind, node_size=30, cmap=plt.cm.RdYlBu, node_color=list(ind)
+                ind, pos=pos_ind, node_size=30, cmap=plt.cm.RdYlBu, node_color=range(len(ind))
             )
             nx.draw_networkx_edges(ind, pos_ind, alpha=0.3)
+
+
 
     ## I/O
     def read(self):
@@ -644,21 +800,36 @@ class NowcastingModel(Model):
 
     def write_graphmodel(self):
         """write graphmodel at <root/?/> in model ready format"""
-        fn_out = join(self.root, "graph", f"graphmodel.gpickle")
-        nx.write_gpickle(self._graphmodel, fn_out)
-        # IO
-        from matplotlib.backends.backend_pdf import PdfPages
-        import matplotlib.pyplot as plt
 
-        def multipage(filename, figs=None, dpi=200):
-            pp = PdfPages(filename)
-            if figs is None:
-                figs = [plt.figure(n) for n in plt.get_fignums()]
-            for fig in figs:
-                fig.savefig(pp, format="pdf")
-            pp.close()
+        # report
+        figs = [plt.figure(n) for n in plt.get_fignums()]
+        helper.multipage(join(self.root, "graph", "report.pdf"), figs=figs)
 
-        multipage(join(self.root, "graph", "graphmodel.pdf"))
+        # write graph
+        outdir = join(self.root, "graph")
+        self._write_graph(self._graphmodel, outdir, outname="graph")
+
+        # write sugraph
+        if self._subgraphmodels:
+            for subgraph_fn, subgraphmodel in self._subgraphmodels.items():
+                if subgraphmodel:
+                    self._write_graph(
+                        subgraphmodel, outdir, outname=subgraph_fn
+                    )
+
+
+    def _write_graph(self, G: nx.Graph, outdir: str, outname: str = "graph"):
+
+        # write pickle
+        # nx.write_gpickle(G.copy(), join(outdir, f"{outname}.gpickle"))
+
+        # write edges
+        shp = gpd.GeoDataFrame(nx.to_pandas_edgelist(G).set_index("id"))
+        shp.drop(columns=["source", "target"]).to_file(
+            join(outdir, f"{outname}_edges.shp")
+        )
+
+        # TODO write nodes
 
     def read_forcing(self):
         """Read forcing at <root/?/> and parse to dict of xr.DataArray"""

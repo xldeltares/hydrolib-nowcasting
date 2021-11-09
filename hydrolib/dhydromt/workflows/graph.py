@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import pandas as pd
 import geopandas as gpd
 from shapely.geometry import LineString, Point
 import matplotlib.pyplot as plt
@@ -44,15 +45,18 @@ def update_edges_attributes(
     # check if edges id in attribute df
     if edges.index.name == id_col:
         edges.index.name = "id"
-        graph_df = _graph_df.join(edges)
     elif id_col in edges.columns:
         edges = edges.set_index(id_col)
         edges.index.name = "id"
-        graph_df = _graph_df.join(edges)
     else:
         raise ValueError(
             "attributes could not be updated to graph: could not perform join"
         )
+
+    # last item that isnt NA
+    _graph_df = _graph_df.reindex(columns=_graph_df.columns.union(edges.columns, sort=False))
+    graph_df = pd.concat([_graph_df, edges]).groupby(level = 0).last()
+    graph_df = graph_df.loc[_graph_df.index]
 
     G_updated = nx.from_pandas_edgelist(
         graph_df.reset_index(),
@@ -92,7 +96,7 @@ def query_graph_edges_attributes(G, id_col: str = "id", edge_query: str = None):
     return G_query
 
 
-def contract_graph_nodes(G, nodes):
+def contract_graph_nodes(G, nodes, to_node = None):
     """This function contract the nodes into one node in G"""
 
     G_contracted = G.copy()
@@ -100,9 +104,12 @@ def contract_graph_nodes(G, nodes):
 
     if len(nodes) > 1:
         nodes = sorted(nodes)
-        node_contracted.append(nodes[0])
-        for node in nodes[1:]:
-            G_contracted = nx.contracted_nodes(G_contracted, nodes[0], node)
+        if not to_node: # use the first node
+            to_node = nodes[0]
+        nodes = list(set(nodes) - set(to_node))
+        node_contracted.append(to_node)
+        for node in nodes:
+            G_contracted = nx.contracted_nodes(G_contracted, to_node, node, self_loops=False)
 
     return G_contracted, node_contracted
 
