@@ -106,10 +106,10 @@ def contract_graph_nodes(G, nodes, to_node = None):
         nodes = sorted(nodes)
         if not to_node: # use the first node
             to_node = nodes[0]
-        nodes = list(set(nodes) - set(to_node))
+        nodes = [n for n in nodes if n != to_node]
         node_contracted.append(to_node)
         for node in nodes:
-            G_contracted = nx.contracted_nodes(G_contracted, to_node, node, self_loops=False)
+            G_contracted = nx.contracted_nodes(G_contracted, to_node, node, self_loops=False, copy = False)
 
     return G_contracted, node_contracted
 

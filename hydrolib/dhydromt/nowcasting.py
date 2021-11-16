@@ -6,6 +6,7 @@ from pathlib import Path
 import logging
 import matplotlib.pyplot as plt
 
+import numpy as np
 import networkx as nx
 from rasterio.warp import transform_bounds
 import pyproj
@@ -287,6 +288,8 @@ class NowcastingModel(Model):
         df = df.drop_duplicates()
         self.logger.debug(f"drop duplicates in dataframe")
 
+        self.logger.info(f"{len(df)} features read from {path_or_key}")
+
         return df
 
     def update_edges(
@@ -361,7 +364,7 @@ class NowcastingModel(Model):
             self.logger.warning(f"subgraph instance {subgraph_fn} already exist, apply setup_subgraph on subgraph_fn and overwrite.")
             G = self._subgraphmodels[subgraph_fn].copy()
         elif subgraph_fn:
-            self.logger.debug(f"subgraph instance {subgraph_fn} will be created")
+            self.logger.debug(f"subgraph instance {subgraph_fn} will be created from graph")
             G = self._graphmodel.copy()
         else:
             self.logger.debug(f"graph will be updated.")
@@ -393,7 +396,8 @@ class NowcastingModel(Model):
                     SG,
                     edge_query=targets,
                 )
-                SG, targets = graph.contract_graph_nodes(SG, _target_G.nodes)
+                targets = [v for u,v in _target_G.edges()]
+
             except:
                 pass
         elif isinstance(targets, list):
@@ -448,7 +452,7 @@ class NowcastingModel(Model):
             self.logger.debug(
                 f"creating dag from SG nodes to targets"
             )
-            SG = self._setup_dag(SG, targets=targets, weight=weight)
+            SG = self._setup_dag(SG, targets=targets, weight=weight, **kwargs)
 
         # assign SG
         if subgraph_fn:
@@ -480,10 +484,10 @@ class NowcastingModel(Model):
             # base
             nx.draw(G, pos=pos, node_size=0, with_labels=False, arrows=False, node_color='gray',
                     edge_color='silver',
-                    width=1)
+                    width=0.5)
             # SG nodes and edges
             if algorithm == 'dag':
-                nx.draw_networkx_nodes(G, pos=pos, nodelist=targets, node_size=50, node_shape="*", node_color='r')
+                nx.draw_networkx_nodes(G, pos=pos, nodelist=targets, node_size=200, node_shape="*", node_color='r')
                 edge_width = [d[2] / 100 for d in SG.edges(data="nnodes_upstream")]
                 nx.draw_networkx_edges(SG, pos=pos, edgelist=SG.edges(), arrows=False,
                                        width=[float(i) / (max(edge_width) + 0.1) * 20 + 0.5 for i in edge_width])
@@ -500,6 +504,7 @@ class NowcastingModel(Model):
             weight: str = None,
             algorithm: str = "dijkstra",
             report: str = None,
+            use_super_target:bool = True,
             **kwargs,
     ):
         """This component prepares subgraph as Directed Acyclic Graphs (dag) using shortest path
@@ -528,6 +533,13 @@ class NowcastingModel(Model):
             If `weight` is None, unweighted graph methods are used, and this
             suggestion is ignored.
 
+        Arguments
+        ----------
+        use_super_target : bool
+            whether to add a super target at the ends of all targets.
+            True if the weight of DAG exist for all edges.
+            False if the weight of DAG also need to consider attribute specified for targets.
+
         """
 
         if G is not None:
@@ -555,26 +567,39 @@ class NowcastingModel(Model):
         if algorithm not in ("dijkstra", "bellman-ford"):
             raise ValueError(f"algorithm not supported: {algorithm}")
 
-
-
         # started making dag
         DAG = nx.DiGraph()
 
         # 1. add path
         for _ in nx.connected_components(G):
             SG = G.subgraph(_).copy()
-            # add super target
-            _t = -1
-            SG.add_edges_from([(t, _t) for t in list(set(SG.nodes) & set(targets))])
-            # FIXME: if dont do this step: networkx.exception.NetworkXNoPath: No path to **.
-            for n in SG.nodes:
-                if n not in DAG:
-                    # gradient = n['streetlev'] - t['streetlev']
-                    path = nx.shortest_path(SG, n, _t, weight=weight, method=algorithm)
-                    # t_path = nx.single_source_dijkstra_path_length(SG, n, t
-                    #                                                weight=lambda u, v, e: (s['streetlev'] - t['streetlev'])/e['geom_length'])
-                    nx.add_path(DAG, path)
-                    DAG.remove_node(_t)
+            # FIXME: if don't do this step: networkx.exception.NetworkXNoPath: No path to **.
+            if use_super_target:
+                # add super target
+                _t = [-1]
+                if weight == 'streetlev':
+                    # FIXME temporary
+                    # mirror weights at super edges
+                    for w in ["geom_length", 'streetlev']:
+                        SG.add_weighted_edges_from([(t,
+                                                    _t[0],
+                                                    max([k[1][w] if w in k[1] else 0 for k in SG[t].items() ]))
+                                                    for t in list(set(SG.nodes) & set(targets))], weight = w)
+                else:
+                    SG.add_edges_from([(t,_t[0]) for t in list(set(SG.nodes) & set(targets))])
+            else:
+                _t = targets
+            for t in _t:
+                for n in SG.nodes:
+                    if n not in DAG:
+                        if weight == 'streetlev':
+                            # FIXME temporary
+                            smax = max([k[1]['streetlev'] for k in SG[t].items()])
+                            path = nx.shortest_path(SG, n, t, weight=lambda u, v, e: 10-smax/e['geom_length'], method=algorithm)
+                        else:
+                            path = nx.shortest_path(SG, n, t, weight=weight, method=algorithm)
+                        nx.add_path(DAG, path)
+                        DAG.remove_node(t)
 
         # 2. add back weights
         for u, v, new_d in DAG.edges(data=True):
@@ -678,7 +703,8 @@ class NowcastingModel(Model):
 
         # contracted graph - slower but neater
         # use both G and SG
-        ind = G.copy()
+        ind = self._graphmodel.copy()
+        nx.set_node_attributes(ind,{n:{'ind_size':1} for n in ind.nodes})
         for part in np.unique(list(partition.values())):
             part_nodes = [n for n in partition if partition[n] == part]
             if part == -1:
@@ -687,6 +713,7 @@ class NowcastingModel(Model):
             else:
                 for to_node in [n for n in part_nodes if n in SG_targets]:
                     ind, targets = graph.contract_graph_nodes(ind, part_nodes, to_node)
+                    ind.nodes[to_node]['ind_size'] = len(part_nodes)
 
         # visualise
         if report:
@@ -722,7 +749,8 @@ class NowcastingModel(Model):
             nx.draw(G, pos=pos_G, node_size=0, with_labels=False, arrows=False, node_color='gray', edge_color='silver',
                     width=0.2)
             nx.draw_networkx_nodes(
-                ind, pos=pos_ind, node_size=30, cmap=plt.cm.RdYlBu, node_color=range(len(ind))
+                ind, pos=pos_ind, node_size=list(dict(ind.nodes(data = "ind_size")).values()),
+                cmap=plt.cm.RdYlBu, node_color=range(len(ind))
             )
             nx.draw_networkx_edges(ind, pos_ind, alpha=0.3)
 
