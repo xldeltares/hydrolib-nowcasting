@@ -11,6 +11,7 @@ import contextily as ctx
 import random
 from networkx.drawing.nx_agraph import graphviz_layout
 
+from ..workflows.helper import *
 
 logger = logging.getLogger(__name__)
 
@@ -20,14 +21,54 @@ __all__ = []
 # create graph
 
 
-def add_edges_with_id(G: nx.Graph, edges: gpd.GeoDataFrame, id_col: str) -> nx.Graph():
+
+def add_edges_with_id(G: nx.Graph, edges: gpd.GeoDataFrame, id_col: str, snap_offset: float = 1e-6) -> nx.Graph():
     """Return graph with edges and edges ids"""
+
+    # preprocess edges
+    # precision correction
+    edges = reduce_gdf_precision(edges, rounding_precision=1e-8)  # recommned to be larger than e-8
+    # snap branches
+    edges = snap_branch_ends(edges, offset=snap_offset)
+    logger.debug(
+            f"Performing snapping at edges ends.")
 
     for index, row in edges.iterrows():
         from_node = row.geometry.coords[0]
         to_node = row.geometry.coords[-1]
 
         G.add_edge(from_node, to_node, id=row[id_col])
+
+    return G
+
+
+def add_nodes_with_id(G: nx.Graph, nodes: gpd.GeoDataFrame, id_col: str, snap_offset: float = 1e-6) -> nx.Graph():
+    """return graph with nodes and nodes ids"""
+
+    # derived nodes and user nodes
+    G_nodes = gpd.GeoDataFrame(
+        {
+            "geometry": [Point(p) for p in G.nodes],
+            "id": [f"{p[0]:.6f}_{p[1]:.6f}" for p in G.nodes],
+            "tuple": G.nodes,
+        }
+    ).set_index("id")
+    if 'id' in nodes.columns:
+        logger.error('Abort: nodes contains id columns. Please remove the column.')
+    F_nodes = nodes.rename(columns={id_col: "id"}).set_index("id")
+
+    # map user nodes to derived nodes
+    if set(F_nodes.index).issubset(set(G_nodes.index)):
+        # check if 1-to-1 match
+        G_nodes_new = G_nodes.join(F_nodes.drop(columns="geometry"))
+
+    else:
+        G_nodes_new = snap_nodes_to_nodes(F_nodes, G_nodes, snap_offset)
+        logger.debug("performing snap nodes to graph nodes")
+
+    # assign nodes id to graph
+    dict = {row.tuple: i for i, row in G_nodes_new.iterrows()}
+    nx.set_node_attributes(G, dict, "id")
 
     return G
 
@@ -54,8 +95,10 @@ def update_edges_attributes(
         )
 
     # last item that isnt NA
-    _graph_df = _graph_df.reindex(columns=_graph_df.columns.union(edges.columns, sort=False))
-    graph_df = pd.concat([_graph_df, edges]).groupby(level = 0).last()
+    _graph_df = _graph_df.reindex(
+        columns=_graph_df.columns.union(edges.columns, sort=False)
+    )
+    graph_df = pd.concat([_graph_df, edges]).groupby(level=0).last()
     graph_df = graph_df.loc[_graph_df.index]
 
     G_updated = nx.from_pandas_edgelist(
@@ -67,6 +110,42 @@ def update_edges_attributes(
     )
 
     return G_updated
+
+
+def update_nodes_attributes(
+    G: nx.Graph,
+    nodes: gpd.GeoDataFrame,
+    id_col: str,
+) -> nx.Graph():
+    """This function updates the graph by adding new edges attributes specified in edges"""
+
+    # graph df
+    _graph_df = pd.DataFrame(G.nodes(data = 'id'), columns = ["tuple", "id"]).set_index("id")
+
+    # check if edges id in attribute df
+    if nodes.index.name == id_col:
+        nodes.index.name = "id"
+    elif id_col in nodes.columns:
+        nodes = nodes.set_index(id_col)
+        nodes.index.name = "id"
+    else:
+        raise ValueError(
+            "attributes could not be updated to graph: could not perform join"
+        )
+
+    # last item that isnt NA
+    _graph_df = _graph_df.reindex(
+        columns=_graph_df.columns.union(nodes.columns, sort=False)
+    )
+    graph_df = pd.concat([_graph_df, nodes]).groupby(level=0).last()
+    graph_df = graph_df.loc[_graph_df.index]
+
+    # add each attribute
+    for c in nodes.columns:
+        dict = {row.tuple: row[c] for i, row in graph_df.iterrows()}
+        nx.set_node_attributes(G, dict, c)
+
+    return G
 
 
 # extract/contract graph
@@ -96,7 +175,7 @@ def query_graph_edges_attributes(G, id_col: str = "id", edge_query: str = None):
     return G_query
 
 
-def contract_graph_nodes(G, nodes, to_node = None):
+def contract_graph_nodes(G, nodes, to_node=None):
     """This function contract the nodes into one node in G"""
 
     G_contracted = G.copy()
@@ -104,12 +183,14 @@ def contract_graph_nodes(G, nodes, to_node = None):
 
     if len(nodes) > 1:
         nodes = sorted(nodes)
-        if not to_node: # use the first node
+        if not to_node:  # use the first node
             to_node = nodes[0]
         nodes = [n for n in nodes if n != to_node]
         node_contracted.append(to_node)
         for node in nodes:
-            G_contracted = nx.contracted_nodes(G_contracted, to_node, node, self_loops=False, copy = False)
+            G_contracted = nx.contracted_nodes(
+                G_contracted, to_node, node, self_loops=False, copy=False
+            )
 
     return G_contracted, node_contracted
 
@@ -188,12 +269,21 @@ def make_graphplot_for_targetnodes(
     return fig, ax
 
 
-def plot_xy(G: nx.DiGraph):
+def plot_xy(G: nx.DiGraph, plot_outfall = False):
     plt.figure(figsize=(8, 8))
     plt.axis("off")
     pos_G = {xy: xy for xy in G.nodes()}
     nx.draw_networkx_nodes(G, pos=pos_G, node_size=10, node_color="k")
     nx.draw_networkx_edges(G, pos=pos_G, edge_color="k", arrows=False)
+
+    if plot_outfall:
+        if isinstance(G, nx.DiGraph):
+            endnodes = [n for n in G.nodes if G.out_degree[n] == 0 and G.degree[n] == 1]
+            startnodes = [n for n in G.nodes if G.in_degree[n] == 0 and G.degree[n] == 1]
+            nx.draw_networkx_nodes(endnodes, pos=pos_G, node_size=50, node_color="r", node_shape = 'o')
+            nx.draw_networkx_nodes(startnodes, pos=pos_G, node_size=20, node_color="b", node_shape = 'v')
+        else:
+            pass # can only be used in case of digraph
     return
 
 
