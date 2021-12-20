@@ -175,6 +175,27 @@ def query_graph_edges_attributes(G, id_col: str = "id", edge_query: str = None):
     return G_query
 
 
+
+
+def query_graph_nodes_attributes(G, id_col: str = "id", node_query: str = None):
+    """This function queries the graph by selecting only the nodes specified in node_query"""
+
+    if node_query is None:
+        G_query = G
+
+    else:
+        _graph_df = pd.DataFrame.from_dict(dict(G.nodes(data=True)), orient='index')
+        graph_df = _graph_df.query(node_query)
+
+        if len(graph_df) != 0:
+            G_query = G.subgraph(graph_df.index.tolist()).copy()
+        else:
+            raise ValueError("node_query results in nothing left")
+
+    return G_query
+
+
+
 def contract_graph_nodes(G, nodes, to_node=None):
     """This function contract the nodes into one node in G"""
 
@@ -491,3 +512,5 @@ def validate_1dnetwork_flowpath(
         plt.savefig(exportpath.joinpath("validate_1dnetwork_flowpath"))
 
     return None
+
+

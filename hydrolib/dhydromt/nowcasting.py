@@ -431,8 +431,9 @@ class NowcastingModel(Model):
         edge_query: str = None,
         edge_target: str = None,
         node_query: str = None,
+        node_target: str = None,
         algorithm: str = None,
-        targets=None,
+        target_query: str = None,
         weight: str = None,
         report: str = None,
         **kwargs,
@@ -456,6 +457,12 @@ class NowcastingModel(Model):
         edge_target : str
             Conditions to request from subgraph the connected components that has the edge_target id
             Applies on existing id of edges.
+        node_query : str
+            Conditions to query the subgraph from graph.
+            Applies on existing attributes of nodes, so make sure to add the attributes first.
+        node_target : str
+            Conditions to request from subgraph the connected components that has the node_target id
+            Applies on existing id of nodes.
         algorithm : str = None
             Algorithms to apply addtional processing on subgraph.
             Supported options: 'patch', 'mst', 'dag'.
@@ -483,18 +490,23 @@ class NowcastingModel(Model):
             self.logger.debug(f"will apply on graph itself.")
             G = self._graphmodel.copy()
 
+        SG = G.copy()
+
+        # check queries
+        if all (v is not None for v in [edge_query, node_query]):
+            raise ValueError("could not apply on both edges and nodes")
+
         # query edges/nodes
         if edge_query is None:
-            SG = G
+            SG = SG
         else:
             self.logger.debug(f"query sedges: {edge_query}")
             SG = graph.query_graph_edges_attributes(
-                G,
+                SG,
                 id_col="id",
                 edge_query=edge_query,
             )
             self.logger.debug(f"{len(SG.edges())}/{len(G.edges())} edges are selected")
-        # FIXME: add node query
 
         # select the subgraph component based on edge id
         if edge_target is None:
@@ -504,27 +516,36 @@ class NowcastingModel(Model):
                 if any(e[2] == edge_target for e in SG.subgraph(c).edges(data = 'id')):
                     SG = SG.subgraph(c).copy()
                     self.logger.debug(f"connected components from subgraph containing edge {edge_target} is selected")
-        # FIXME: add node target
+
+        # query nodes
+        if node_query is None:
+            SG = SG
+        else:
+            self.logger.debug(f"query nodes: {node_query}")
+            SG = graph.query_graph_nodes_attributes(
+                SG,
+                id_col="id",
+                node_query=node_query,
+            )
+            self.logger.debug(f"{len(SG.nodes())}/{len(G.nodes())} nodes are selected")
+
+        # select the subgraph component based on node id
+        if node_target is None:
+            pass
+        else:
+            for c in nx.connected_components(SG.to_undirected()):
+                if any(n[-1] == node_target for n in SG.subgraph(c).nodes(data = 'id')):
+                    SG = SG.subgraph(c).copy()
+                    self.logger.debug(f"connected components from subgraph containing node {node_target} is selected")
+
 
         if algorithm is not None:
             if algorithm not in ("patch", "mst", "dag"):
                 raise ValueError(f"algorithm not supported: {algorithm}")
 
-        if targets is None:
-            targets = [n for n in SG.nodes if SG.out_degree[n] == 0]
-        elif isinstance(targets, str):
-            try:
-                _target_G = graph.query_graph_edges_attributes(
-                    SG,
-                    edge_query=targets,
-                )
-                targets = [v for u, v in _target_G.edges()]
-
-            except:
-                pass
-        elif isinstance(targets, list):
-            assert set(targets).issubset(set(SG.nodes)), "targets must be the nodes id"
-        self.logger.debug(f"target are {targets}")
+        # check targets
+        targets = self._find_target_nodes(G, target_query, target_query)
+        self.logger.debug(f"{len(targets)} targets are selected")
 
         if weight is not None:
             assert (
@@ -572,7 +593,7 @@ class NowcastingModel(Model):
         elif algorithm == "dag":
             # dag
             self.logger.debug(f"creating dag from SG nodes to targets")
-            SG = self._setup_dag(SG, targets=targets, weight=weight, **kwargs)
+            SG = self.setup_dag(SG, targets=targets, weight=weight, **kwargs)
 
         # assign SG
         if subgraph_fn:
@@ -625,8 +646,7 @@ class NowcastingModel(Model):
                     node_shape="*",
                     node_color="r",
                 )
-                edge_width = [d[2] / 100 for d in SG.edges(data="nnodes_upstream")]
-                # edge_width = [d[2] / 100 for d in SG.edges(data="area")]
+                edge_width = [d[2] / 100 for d in SG.edges(data="nnodes")]
                 nx.draw_networkx_edges(
                     SG,
                     pos=pos,
@@ -650,13 +670,51 @@ class NowcastingModel(Model):
                     ],
                 )
 
-    def _setup_dag(
+    def _find_target_nodes(self, G:nx.DiGraph, node_query=None, edges_query=None):
+        """helper to find the target nodes"""
+
+        targets = None
+
+        if all(v is None for v in [node_query,edges_query]):
+            targets = [n for n in G.nodes if G.out_degree[n] == 0]
+
+        if isinstance(edges_query, str):
+            try:
+                _target_G = graph.query_graph_edges_attributes(
+                    G,
+                    edge_query=edges_query,
+                )
+                targets = [v for u, v in _target_G.edges()]
+                self.logger.debug("Find targets in edges")
+            except Exception as e:
+                self.logger.debug(e)
+                pass
+
+        if isinstance(node_query, str):
+            try:
+                _target_G = graph.query_graph_nodes_attributes(
+                    G,
+                    node_query=node_query,
+                )
+                targets = [n for n in _target_G.nodes()]
+                self.logger.debug("Find targets in nodes")
+            except Exception as e:
+                self.logger.debug(e)
+                pass
+
+        if targets is None:
+            raise ValueError("could not find targets.")
+
+        return targets
+
+
+    def setup_dag(
         self,
         G: nx.Graph = None,
-        targets=None,
+        targets = None,
+        target_query:str = None,
         weight: str = None,
-        load:str = None,
-        algorithm: str = "dijkstra",
+        loads: list = [],
         report: str = None,
         use_super_target: bool = True,
         **kwargs,
@@ -680,11 +738,12 @@ class NowcastingModel(Model):
             If None, every edge has weight/distance/cost 1.
             If a string, use this edge attribute as the edge weight.
             Any edge attribute not present defaults to 1.
-        load : None or string, options (default - None)
-            Load used from nodes attributes.
-            If None, every edges has a load equal to the total number of nodes upstream.
-            If a string, use the node attribute as weight.
-            any node attribute not present defaults to 0.
+        loads : None or list of strings, optional (default - None)
+            Load used from edges/nodes attributes.
+            If None, every node/edge has a load equal to the total number of nodes upstream (nnodes), and number of edges upstream (nedges).
+            If a list, use the attributes in the list as load.
+            The attribute can be either from edges or from nodes.
+            Any attributes that are not present defaults to 0.
         algorithm : string, optional (default = 'dijkstra')
             The algorithm to use to compute the path.
             Supported options: 'dijkstra', 'bellman-ford'.
@@ -700,87 +759,82 @@ class NowcastingModel(Model):
             False if the weight of DAG also need to consider attribute specified for targets.
 
         """
-
-        if G is not None:
-            if isinstance(G, nx.DiGraph):
+        # convert Digraph to Graph
+        if G is None:
+            G = self._graphmodel
+            self.logger.debug("Apply dag on graphmodel.")
+        if isinstance(G, nx.DiGraph):
+                _G = G.copy()
                 G = G.to_undirected()
-            pass
-        else:
-            return G
 
-        if targets is None:
-            targets = [n for n in G.nodes if G.out_degree[n] == 0]
-        elif isinstance(targets, str):
-            try:
-                _target_G = graph.query_graph_edges_attributes(
-                    G,
-                    edge_query=targets,
-                )
-                G, targets = graph.contract_graph_nodes(G, _target_G.nodes)
-            except:
-                pass
-        elif isinstance(targets, list):
-            assert set(targets).issubset(set(G.nodes)), "targets must be the nodes id"
-        self.logger.debug(f"target are {targets}")
+        # check if graph is fully connected
+        if len([_ for _ in nx.connected_components(G)]) > 1:
+            raise TypeError("Cannot apply dag on disconnected graph.")
 
+        # check targets of the dag
+        if isinstance(target_query, str):
+            targets = self._find_target_nodes(_G, target_query, target_query)
+        self.logger.debug(f"{len(targets)} targets are selected")
+
+        # check algorithm of the dag
+        algorithm = "dijkstra"
         if algorithm not in ("dijkstra", "bellman-ford"):
             raise ValueError(f"algorithm not supported: {algorithm}")
+        self.logger.debug(f"Performing {algorithm}")
 
         # started making dag
         DAG = nx.DiGraph()
 
         # 1. add path
-        for _ in nx.connected_components(G):
-            SG = G.subgraph(_).copy()
-            # FIXME: if don't do this step: networkx.exception.NetworkXNoPath: No path to **.
-            if use_super_target:
-                # add super target
-                _t = [-1]
-                if weight == "streetlev":
-                    # FIXME temporary
-                    # mirror weights at super edges
-                    for w in ["geom_length", "streetlev"]:
-                        SG.add_weighted_edges_from(
-                            [
-                                (
-                                    t,
-                                    _t[0],
-                                    max(
-                                        [
-                                            k[1][w] if w in k[1] else 0
-                                            for k in SG[t].items()
-                                        ]
-                                    ),
-                                )
-                                for t in list(set(SG.nodes) & set(targets))
-                            ],
-                            weight=w,
-                        )
-                else:
-                    SG.add_edges_from(
-                        [(t, _t[0]) for t in list(set(SG.nodes) & set(targets))]
+        # FIXME: if don't do this step: networkx.exception.NetworkXNoPath: No path to **.
+        if use_super_target:
+            # add super target
+            _t = [-1]
+            if weight == "streetlev":
+                # FIXME temporary
+                # mirror weights at super edges
+                for w in ["geom_length", "streetlev"]:
+                    G.add_weighted_edges_from(
+                        [
+                            (
+                                t,
+                                _t[0],
+                                max(
+                                    [
+                                        k[1][w] if w in k[1] else 0
+                                        for k in G[t].items()
+                                    ]
+                                ),
+                            )
+                            for t in list(set(G.nodes) & set(targets))
+                        ],
+                        weight=w,
                     )
             else:
-                _t = targets
-            for t in _t:
-                for n in SG.nodes:
-                    if n not in DAG:
-                        if weight == "streetlev":
-                            # FIXME temporary
-                            smax = max([k[1]["streetlev"] for k in SG[t].items()])
-                            path = nx.shortest_path(
-                                SG,
-                                n,
-                                t,
-                                weight=lambda u, v, e: 10 - smax / e["geom_length"],
-                                method=algorithm,
-                            )
-                        else:
-                            path = nx.shortest_path(
-                                SG, n, t, weight=weight, method=algorithm
-                            )
-                        nx.add_path(DAG, path)
-                        DAG.remove_node(t)
+                G.add_edges_from(
+                    [(t, _t[0]) for t in list(set(G.nodes) & set(targets))]
+                )
+        else:
+            _t = targets
+        for t in _t:
+            for n in G.nodes:
+                if n not in DAG:
+                    if weight == "streetlev":
+                        # FIXME temporary
+                        smax = max([k[1]["streetlev"] for k in G[t].items()])
+                        path = nx.shortest_path(
+                            G,
+                            n,
+                            t,
+                            weight=lambda u, v, e: 10 - smax / e["geom_length"],
+                            method=algorithm,
+                        )
+                    else:
+                        path = nx.shortest_path(
+                            G, n, t, weight=weight, method=algorithm
+                        )
+                    nx.add_path(DAG, path)
+                    DAG.remove_node(t)
 
         # 2. add back weights
         for u, v, new_d in DAG.edges(data=True):
@@ -793,12 +847,30 @@ class NowcastingModel(Model):
 
         # 3. add auxiliary calculations
         _ = DAG.reverse()
+        nodes_attributes = [k for n in G.nodes for k in G.nodes[n].keys()]
+        edges_attribute = [k for e in G.edges for k in G.edges[e].keys()]
+        nodes_loads = [l for l in loads if l in nodes_attributes]
+        edegs_loads = [l for l in loads if l in edges_attribute]
+
         for s, t in _.edges():
             upstream_nodes = list(nx.dfs_postorder_nodes(_, t))
+            upstream_edges = list(G.subgraph(upstream_nodes).edges())
             nnodes = len(upstream_nodes)
-            loads = np.nansum([SG.nodes[n][load] for n in upstream_nodes])
-            DAG[t][s].update({"nnodes_upstream": nnodes,
-                              load: loads})
+            nedges = len(upstream_edges)
+            DAG[t][s].update({"nnodes": nnodes, "nedges": nedges})
+            DAG.nodes[s].update({"nnodes": nnodes, "nedges": nedges})
+            sumload_from_nodes = 0
+            sumload_from_edges = 0
+            for l in loads:
+                if l in nodes_loads:
+                    sumload_from_nodes = np.nansum([G.nodes[n][l] for n in upstream_nodes])
+                elif l in edegs_loads:
+                    sumload_from_edges = np.nansum([G[e[0]][e[1]][l] for e in upstream_edges])
+                else:
+                    raise KeyError(f"Load {l} does exist in nodes/edges attributes.")
+                sumload = sumload_from_nodes + sumload_from_edges
+                DAG[t][s].update({l: sumload})
+                DAG.nodes[s].update({l: sumload})
 
         # validate DAG
         if nx.is_directed_acyclic_graph(DAG):
@@ -815,51 +887,44 @@ class NowcastingModel(Model):
 
             # plot xy
             plt.figure(figsize=(8, 8))
+            plt.title(report, wrap=True, loc="left")
             plt.axis("off")
-            plt.title(report)
-            pos = {xy: xy for xy in DAG.nodes()}
+            pos = {xy: xy for xy in G.nodes()}
+
             # base
             nx.draw(
-                G,
+                DAG,
                 pos=pos,
                 node_size=0,
                 with_labels=False,
                 arrows=False,
                 node_color="gray",
                 edge_color="silver",
-                width=1,
+                width=0.5,
             )
-            # nodes dag
             nx.draw_networkx_nodes(
-                G,
+                DAG,
                 pos=pos,
                 nodelist=targets,
-                node_size=50,
+                node_size=200,
                 node_shape="*",
                 node_color="r",
             )
-            # edges dag
-            edge_width = [d[2] / 100 for d in DAG.edges(data="nnodes_upstream")]
+            edge_width = [d[2] / 100 for d in DAG.edges(data="nnodes")]
             nx.draw_networkx_edges(
                 DAG,
                 pos=pos,
                 edgelist=DAG.edges(),
                 arrows=False,
                 width=[
-                    float(i) / (max(edge_width) + 0.1) * 20 + 0.5 for i in edge_width
+                    float(i) / (max(edge_width) + 0.1) * 20 + 0.5
+                    for i in edge_width
                 ],
             )
-            nx.draw_networkx_nodes(
-                DAG,
-                pos=pos,
-                nodelist=targets,
-                node_size=50,
-                node_shape="*",
-                node_color="r",
-            )
 
-        self._daggraphmodel = DAG
+        self._graphmodel = DAG
         return DAG
+
 
     def setup_partition(
         self,
