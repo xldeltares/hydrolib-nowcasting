@@ -107,7 +107,7 @@ class NowcastingModel(Model):
 
     def setup_graph(
         self,
-        graph_class: str = 'DiGraph',
+        graph_class: str = None,
         report: str = None,
         **kwargs,
     ):
@@ -144,7 +144,7 @@ class NowcastingModel(Model):
             "DiGraph",
             "MultiGraph",
             "MultiDiGraph",
-        ], "graph class not recognised"
+        ], "graph_class not recognised. Please assign grah_class using one of the following [Graph, DiGraph, MultiGraph, MultiDiGraph]"
             self._graphmodel = eval(f"nx.{graph_class}()")
 
         if report:
@@ -270,7 +270,7 @@ class NowcastingModel(Model):
 
         # parameter handling
         if attribute_cols is None:
-            attribute_cols = ["geometry"]
+            attribute_cols = []
 
         if edges_fn is None:
             logger.error("edges_fn must be specified.")
@@ -283,7 +283,8 @@ class NowcastingModel(Model):
         ), f"id and/or attribute cols {[id_col] + attribute_cols} do not exist in {edges.columns}"
 
         if use_location is True:
-            self.logger.debug(f"Adding edges with id.")
+            self.logger.debug(f"Adding new edges.")
+            attribute_cols = ["geometry"] + attribute_cols
             self._graphmodel = graph.add_edges_with_id(
                 self._graphmodel, edges=edges, id_col=id_col, snap_offset=snap_offset
             )
@@ -333,7 +334,7 @@ class NowcastingModel(Model):
 
         # parameter handling
         if attribute_cols is None:
-            attribute_cols = ["geometry"]
+            attribute_cols = []
 
         if nodes_fn is None:
             logger.error("nodes_fn must be specified.")
@@ -347,7 +348,8 @@ class NowcastingModel(Model):
         ), f"id and/or attribute cols {[id_col] + attribute_cols} do not exist in {nodes.columns}"
 
         if use_location is True:
-            self.logger.debug(f"Adding nodes with id.")
+            self.logger.debug(f"Adding new nodes.")
+            attribute_cols = ["geometry"] + attribute_cols
             self._graphmodel = graph.add_nodes_with_id(
                 self._graphmodel, nodes=nodes, id_col=id_col, snap_offset = snap_offset,
             )
@@ -424,6 +426,9 @@ class NowcastingModel(Model):
         self.logger.info(f"{len(df)} features read from {path_or_key}")
 
         return df
+
+
+
 
     def setup_subgraph(
         self,
@@ -761,7 +766,7 @@ class NowcastingModel(Model):
         """
         # convert Digraph to Graph
         if G is None:
-            G = self._graphmodel
+            G = self._graphmodel.copy()
             self.logger.debug("Apply dag on graphmodel.")
         if isinstance(G, nx.DiGraph):
                 _G = G.copy()
@@ -928,60 +933,111 @@ class NowcastingModel(Model):
 
     def setup_partition(
         self,
-        subgraph_fn: str = "subgraph",
+        subgraph_fn: str = None,
         algorithm: str = "simple",
         report: str = None,
-        contracted=False,
+        contracted:bool = False,
         **kwargs,
     ):
-        """This component prepares the partition from subgraph
-
-        in progress
+        """This component prepares the partition based on the connectivity of graph
 
         Parameters
         ----------
+        subgraph_fn : str
+            Name of the subgraph instance.
+            If None, self._graphmodel will be used for partition; the function will update the self._graphmodel
+            if String and new, self._graphmodel will be used for partition; the function will create the instance in self._subgraphmodels
+            if String and old, self._subgraphmodels[subgraph_fn] will be used for partition; the function will update the instance in self._subgraphmodels[subgraph_fn]
         algorithm : str
-            Algorithm to derive partitions from subgraph. Options: ['louvain', 'simple']
+            Algorithm to derive partitions from subgraph. Options: ['simple', 'louvain' ]
             testing methods:
-            "simple" based on connected subgraphs
-            "louvain":  # based on louvain algorithm
+            "simple" : based on connected components, every connected components will be considered as a partition (undirected)
+            "flowpath" : based on direction of the edges, the graph is devided into a few partitions, each of which represents a target node with all of its sources.
+            "louvain": based on louvain algorithm (work in progress)  (undirected). "It measures the relative density of edges inside communities with respect to edges outside communities. Optimizing this value theoretically results in the best possible grouping of the nodes of a given network."(from wikipedia)
+        contracted : bool
+            Specify whether to build contracted graph from the parititons. So a new contracted graph is created, with a node representing a part of the graph; edges represernting the connectivity between the parts
+            If True, each partition will be contracted to a node
+            If False, no contraction is performed
         """
 
-        # algorithm louvain
-        import community
-        import matplotlib.pyplot as plt
-        import numpy as np
-
+        # get graph model
         G = self._graphmodel.copy()
         G_targets = [n for n in G.nodes if G.out_degree[n] == 0]
 
-        SG = self._subgraphmodels[subgraph_fn].copy()
+        # get subgraph if applicable
+        if subgraph_fn in self._subgraphmodels:
+            self.logger.warning(
+                f"subgraph instance {subgraph_fn} will be used for partition."
+            )
+            SG = self._subgraphmodels[subgraph_fn].copy()
+        elif subgraph_fn is not None:
+            self.logger.warning(
+                f"graph will be used for partition."
+            )
+            SG = self._graphmodel.copy()
+        else:
+            self.logger.debug(f"graph will be used for partition.")
+            SG = self._graphmodel.copy()
         SG_targets = [n for n in SG.nodes if SG.out_degree[n] == 0]
 
-        # UG for further partition
-        UG = SG.to_undirected()
+
+        # start partition
         partition = {n: -1 for n in G.nodes}
+        partition_edges = {e: -1 for e in G.edges}
+
+
         if algorithm == "simple":  # based on connected subgraphs
+            UG = SG.to_undirected() # convert SG to UG for further partition
             for i, ig in enumerate(nx.connected_components(UG)):
-                partition.update({n: i for n in ig})
+                ig = UG.subgraph(ig)
+                partition.update({n: i for n in ig.nodes})
+            partition_edges.update({(s, t): partition[s] for s, t in partition_edges if partition[s] == partition[t]})
+            logger.info(f"algorithm {algorithm} is applied. Note that different partitions are disconnected.")
+        elif algorithm == 'flowpath':
+            assert isinstance(SG, nx.DiGraph), f"algorithm {algorithm} can only be applied on directional graph"
+            SG = graph.sort_direction(SG)
+            endnodes = [n[0] for n in SG.nodes(data = 'endnodes') if n[-1] is not None]
+            partition.update({nn:i for i,n in enumerate(endnodes) for nn in graph.find_predecessors(SG, n)})
+            partition_edges.update({(s, t): partition[s] for s, t in partition_edges if partition[s] == partition[t]})
+            logger.info(f"algorithm {algorithm} is applied. Note that flowpath might be duplicated.")
         elif algorithm == "louvain":  # based on louvain algorithm
-            partition.update(community.best_partition(UG))
+            UG = SG.to_undirected()  # convert SG to UG for further partition
+            partition.update(graph.louvain_partition(UG))
+            partition_edges.update({(s, t): partition[s] for s, t in partition_edges if partition[s] == partition[t]})
         else:
             raise ValueError(
                 f"{algorithm} is not recognised. allowed algorithms: simple, louvain"
             )
+
         n_partitions = max(partition.values())
         self.logger.debug(
             f"{n_partitions} partitions is derived from subgraph using {algorithm} algorithm"
         )
-        # edges_partitions = {(s, t): partition[s] for s, t in G.edges() if partition[s] == partition[t]}
 
+        # update partition to graph
+        nx.set_node_attributes(SG, partition, 'part')
+        nx.set_edge_attributes(SG, partition_edges, 'part')
+        if subgraph_fn in self._subgraphmodels:
+            self.logger.warning(
+                f"subgraph instance {subgraph_fn} will be updated with partition information (part)."
+            )
+            self._subgraphmodels[subgraph_fn] = SG
+        elif subgraph_fn is not None:
+            self.logger.warning(
+                f"subgraph instance {subgraph_fn} will be created with partition information (part)."
+            )
+            self._subgraphmodels[subgraph_fn] = SG
+        else:
+            self.logger.warning(
+                f"graph will be updated with partition information (part)."
+            )
+            self._graphmodel = SG
+
+        # contracted graph
         # induced graph from the partitions - faster but a bit confusing results
         # ind = community.induced_graph(partition, G)
         # ind.remove_edges_from(nx.selfloop_edges(ind))
-
-        # contracted graph - slower but neater
-        # use both G and SG
+        # induced by contracting - slower but neater
         if contracted == True:
             ind = self._graphmodel.copy()
             nx.set_node_attributes(ind, {n: {"ind_size": 1} for n in ind.nodes})
@@ -1008,6 +1064,16 @@ class NowcastingModel(Model):
             plt.figure(figsize=(8, 8))
             plt.title(report, wrap=True, loc="left")
             plt.axis("off")
+            nx.draw(
+                G,
+                pos=pos_G,
+                node_size=0,
+                with_labels=False,
+                arrows=False,
+                node_color="k",
+                edge_color="k",
+                width=0.2,
+            )
             nx.draw_networkx_nodes(
                 G,
                 pos=pos_G,
@@ -1015,7 +1081,6 @@ class NowcastingModel(Model):
                 cmap=plt.cm.RdYlBu,
                 node_color=list(partition.values()),
             )
-            nx.draw_networkx_edges(G, pos_G, alpha=0.3)
 
             # induced partition graph
             if contracted == True:
@@ -1124,28 +1189,42 @@ class NowcastingModel(Model):
         figs = [plt.figure(n) for n in plt.get_fignums()]
         helper.multipage(join(self.root, "graph", "report.pdf"), figs=figs)
 
-        # # write graph
-        # outdir = join(self.root, "graph")
-        # self._write_graph(self._graphmodel, outdir, outname="graph")
-        #
-        # # write subgraph
-        # if self._subgraphmodels:
-        #     for subgraph_fn, subgraphmodel in self._subgraphmodels.items():
-        #         if subgraphmodel:
-        #             self._write_graph(subgraphmodel, outdir, outname=subgraph_fn)
+        # write graph
+        outdir = join(self.root, "graph")
+        self._write_graph(self._graphmodel, outdir, outname="graph")
+
+        # write subgraph
+        if self._subgraphmodels:
+            for subgraph_fn, subgraphmodel in self._subgraphmodels.items():
+                if subgraphmodel:
+                    self._write_graph(subgraphmodel, outdir, outname=subgraph_fn)
 
     def _write_graph(self, G: nx.Graph, outdir: str, outname: str = "graph"):
 
         # write pickle
-        # nx.write_gpickle(G.copy(), join(outdir, f"{outname}.gpickle"))
+        nx.write_gpickle(G.copy(), join(outdir, f"{outname}.gpickle"))
 
         # write edges
         shp = gpd.GeoDataFrame(nx.to_pandas_edgelist(G).set_index("id"))
         shp.drop(columns=["source", "target"]).to_file(
             join(outdir, f"{outname}_edges.shp")
-        )
+        ) # drop them because they are tuple
 
-        # TODO write nodes
+        # write nodes
+        df = pd.DataFrame.from_dict(dict(G.nodes(data=True)), orient='index').reset_index()
+        if len(df) == 0: # no attribute
+            df = pd.DataFrame(dict(G.nodes(data=True)).keys())
+            shp = gpd.GeoDataFrame(
+                df, geometry=gpd.points_from_xy(df[0], df[1]))
+            shp.drop(columns=[0, 1]).to_file(
+                join(outdir, f"{outname}_nodes.shp")
+            )  # drop them because they are tuple
+        else:
+            shp = gpd.GeoDataFrame(
+                df, geometry=gpd.points_from_xy(df.level_0, df.level_1))
+            shp.drop(columns=["level_0", "level_1"]).to_file(
+                join(outdir, f"{outname}_nodes.shp")
+            ) # drop them because they are tuple
 
     def read_forcing(self):
         """Read forcing at <root/?/> and parse to dict of xr.DataArray"""

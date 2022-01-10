@@ -10,6 +10,7 @@ import networkx as nx
 import contextily as ctx
 import random
 from networkx.drawing.nx_agraph import graphviz_layout
+import community
 
 from ..workflows.helper import *
 
@@ -19,7 +20,6 @@ logger = logging.getLogger(__name__)
 __all__ = []
 
 # create graph
-
 
 
 def add_edges_with_id(G: nx.Graph, edges: gpd.GeoDataFrame, id_col: str, snap_offset: float = 1e-6) -> nx.Graph():
@@ -148,7 +148,7 @@ def update_nodes_attributes(
     return G
 
 
-# extract/contract graph
+# process graph
 
 
 def query_graph_edges_attributes(G, id_col: str = "id", edge_query: str = None):
@@ -173,7 +173,6 @@ def query_graph_edges_attributes(G, id_col: str = "id", edge_query: str = None):
             raise ValueError("edges_query results in nothing left")
 
     return G_query
-
 
 
 
@@ -215,6 +214,53 @@ def contract_graph_nodes(G, nodes, to_node=None):
 
     return G_contracted, node_contracted
 
+
+def louvain_partition(G:nx.Graph):
+    """This function is a wrapper around best partiton method in community
+    See :py:meth:`~community.best_partition()` for more information.
+    """
+    return community.best_partition(G)
+
+
+def sort_direction(G:nx.DiGraph) -> nx.DiGraph:
+    """Function sort the start end direction of the graph and obtain start and end nodes.
+
+    Arguments
+    ---------
+    G: nx.DiGraph
+        Directional Graph
+
+    Returns
+    -------
+    G: nx.DiGraph
+        Directional Graph with node attributes endnodes and startnodes"""
+
+    endnodes = {n: True for n in G.nodes if (G.degree[n] == 1 and G.out_degree[n] == 0)}
+    startnodes = {n: True for n in G.nodes if (G.degree[n] == 1 and G.in_degree[n] == 0)}
+    nx.set_node_attributes(G, endnodes, 'endnodes')
+    nx.set_node_attributes(G, startnodes, 'startnodes')
+    return G
+
+
+def find_predecessors(G:nx.DiGraph, n, inclusive = True):
+    """Function to find the predecessors of a node n
+    See :py:meth:`~nx.bfs_predecessors()` for more information.
+
+    Arguments
+    ---------
+    G: nx.DiGraph
+        Directional Graph
+    n:
+        Directional Graph node that are used as target to find predecessors
+    inclusive: bool
+        Whether to include the input node in the results
+    """
+
+    RG = G.reverse()
+    predecessors = list(dict(nx.bfs_predecessors(RG, n)).keys())
+    if inclusive:
+        predecessors = predecessors + [n]
+    return predecessors
 
 # plot graph
 
@@ -294,15 +340,15 @@ def plot_xy(G: nx.DiGraph, plot_outfall = False):
     plt.figure(figsize=(8, 8))
     plt.axis("off")
     pos_G = {xy: xy for xy in G.nodes()}
-    nx.draw_networkx_nodes(G, pos=pos_G, node_size=10, node_color="k")
+    nx.draw_networkx_nodes(G, pos=pos_G, node_size=1, node_color="k")
     nx.draw_networkx_edges(G, pos=pos_G, edge_color="k", arrows=False)
 
     if plot_outfall:
         if isinstance(G, nx.DiGraph):
             endnodes = [n for n in G.nodes if G.out_degree[n] == 0 and G.degree[n] == 1]
             startnodes = [n for n in G.nodes if G.in_degree[n] == 0 and G.degree[n] == 1]
-            nx.draw_networkx_nodes(endnodes, pos=pos_G, node_size=50, node_color="r", node_shape = 'o')
-            nx.draw_networkx_nodes(startnodes, pos=pos_G, node_size=20, node_color="b", node_shape = 'v')
+            nx.draw_networkx_nodes(endnodes, pos=pos_G, node_size=10, node_color="r", node_shape = 'o')
+            nx.draw_networkx_nodes(startnodes, pos=pos_G, node_size=10, node_color="b", node_shape = 'v')
         else:
             pass # can only be used in case of digraph
     return
