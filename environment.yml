@@ -33,3 +33,5 @@ dependencies:
   - scipy
   - xarray
   - zarr
+  - pip
+    -git+https://github.com/openearth/delft3dfmpy.git@deltares-urban
