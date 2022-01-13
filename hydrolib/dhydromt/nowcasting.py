@@ -1,4 +1,5 @@
 """Implement plugin model class"""
+from __future__ import annotations
 
 import glob
 from os.path import join, basename, isfile
@@ -155,8 +156,8 @@ class NowcastingModel(Model):
     def setup_edges(
         self,
         edges_fn: str,
-        id_col: str,
-        attribute_cols: list = None,
+        id_col: str | None = None,
+        attribute_cols: list| None = None,
         snap_offset: float = 10e-6,
         **kwargs,
     ):
@@ -167,14 +168,94 @@ class NowcastingModel(Model):
         _setup_edges
         """
 
-        if edges_fn is not None and id_col is not None:
-            self._setup_edges(
-                edges_fn=edges_fn,
-                id_col=id_col,
-                attribute_cols=attribute_cols,
-                use_location=True,
-                snap_offset=snap_offset,
-            )
+        if edges_fn is None:
+            raise ValueError(f"Expected edges_fn.")
+        else:
+            edges = self._get_geodataframe(edges_fn)
+
+        if id_col is None:
+            raise ValueError('Expected id_col.')
+
+        if attribute_cols is None:
+            attribute_cols = []
+
+        if edges is not None:
+
+            if snap_offset is not None:
+                # preprocessing geometry using snap_offset
+                edges = helper.reduce_gdf_precision(edges, rounding_precision=1e-8)
+                edges = snap_branch_ends(edges, offset=snap_offset)
+                logger.debug(
+                    f"Performing snapping at edges ends.")
+
+            if id_col is not None:
+                self._setup_edges(
+                    edges = edges,
+                    id_col=id_col,
+                    attribute_cols=attribute_cols,
+                    use_location=True
+                )
+
+            self.logger.info(f"Adding staticgeoms {edges_fn}.")
+            self.set_staticgeoms(edges, edges_fn)
+
+        else:
+            raise ValueError("Failed due to zero geometry.")
+
+    def setup_edge_attributes(
+            self,
+            edges_fn: str,
+            id_col: str | None = None,
+            attribute_cols: list| None = None,
+            snap_offset: float | None = None,
+            **kwargs
+    ):
+        """This component update edges attributes to the graph model
+
+        See Also
+        --------
+        _setup_edges
+
+        **kwargs
+            Additional keywords have no effect but might be accepted for
+            compatibility with numpy.
+        """
+
+        if edges_fn is None:
+            raise ValueError(f"Expected edges_fn.")
+        else:
+            edges = self._get_geodataframe(edges_fn)
+
+        if not any(v is not None for v in {id_col, snap_offset}):
+            raise ValueError('Expected either id_col or snap_offset.')
+
+        if attribute_cols is None:
+            attribute_cols = []
+
+        if edges is not None:
+
+            if id_col is None:
+                # preprocessing geometry using snap_offset
+                edges = graph.find_edge_ids_by_snapping(self._graphmodel, edges, snap_offset)
+                id_col = "_id"
+                logger.debug(
+                    f"Performing snapping to edges.")
+
+            if id_col is not None:
+                # join edges attributes by matching id_col
+                self._setup_edges(
+                    edges=edges,
+                    id_col=id_col,
+                    attribute_cols=attribute_cols,
+                    use_location=False,
+                )
+
+            self.logger.info(f"Adding staticgeoms {edges_fn}.")
+            self.set_staticgeoms(edges, edges_fn)
+
+        else:
+            raise ValueError("Failed due to zero geometry.")
+
 
     def setup_nodes(
         self,
@@ -191,34 +272,41 @@ class NowcastingModel(Model):
         _setup_nodes
         """
 
-        if nodes_fn is not None and id_col is not None:
+        if nodes_fn is None:
+            raise ValueError(f"Expected nodes_fn.")
+        else:
+            nodes = self._get_geodataframe(nodes_fn)
+
+        if id_col is None:
+            raise ValueError('Expected id_col.')
+
+        if attribute_cols is None:
+            attribute_cols = []
+
+        if snap_offset is None:
+            # for nodes, snap_offset is always applied
+            snap_offset: float = 10e-6
+
+        if nodes is not None:
+
             self._setup_nodes(
-                nodes_fn=nodes_fn,
+                nodes=nodes,
                 id_col=id_col,
                 attribute_cols=attribute_cols,
                 use_location=True,
                 snap_offset=snap_offset,
             )
 
-    def setup_edge_attributes(
-        self, edges_fn: str, id_col: str, attribute_cols: list = None, **kwargs
-    ):
-        """This component update edges attributes to the graph model
+            self.logger.info(f"Adding staticgeoms {nodes_fn}.")
+            self.set_staticgeoms(nodes, nodes_fn)
 
-        See Also
-        --------
-        _setup_edges
-        """
-        if edges_fn is not None and id_col is not None:
-            self._setup_edges(
-                edges_fn=edges_fn,
-                id_col=id_col,
-                attribute_cols=attribute_cols,
-                use_location=False,
-            )
+        else:
+            raise ValueError("Failed due to zero geometry.")
+
+
 
     def setup_node_attributes(
-        self, nodes_fn: str, id_col: str, attribute_cols: list = None, **kwargs
+        self, nodes_fn: str, id_col: str | None = None, attribute_cols: list | None = None, snap_offset:float | None = None, **kwargs
     ):
         """This component update nodes attributes to the graph model
 
@@ -226,21 +314,53 @@ class NowcastingModel(Model):
         --------
         _setup_nodes
         """
-        if nodes_fn is not None and id_col is not None:
-            self._setup_nodes(
-                nodes_fn=nodes_fn,
-                id_col=id_col,
-                attribute_cols=attribute_cols,
-                use_location=False,
-            )
+
+
+        if nodes_fn is None:
+            raise ValueError(f"Expected nodes_fn.")
+        else:
+            nodes = self._get_geodataframe(nodes_fn)
+
+        if not any(v is not None for v in {id_col, snap_offset}):
+            raise ValueError('Expected either id_col or snap_offset.')
+
+        if attribute_cols is None:
+            attribute_cols = []
+
+        if id_col is None:
+            # for nodes, snap_offset is always applied
+            snap_offset: float = 10e-6
+
+        if nodes is not None:
+
+            if id_col is None:
+                nodes = graph.find_node_ids_by_snapping(self._graphmodel, nodes, snap_offset)
+                id_col = "_id"
+                logger.debug(
+                    f"Performing snapping to nodes.")
+
+            if id_col is not None:
+                self._setup_nodes(
+                    nodes=nodes,
+                    id_col=id_col,
+                    attribute_cols=attribute_cols,
+                    use_location=False,
+                    snap_offset=snap_offset
+                )
+
+            self.logger.info(f"Adding staticgeoms {nodes_fn}.")
+            self.set_staticgeoms(nodes, nodes_fn)
+
+        else:
+            raise ValueError("Failed due to zero geometry.")
+
 
     def _setup_edges(
         self,
-        edges_fn: str,
+        edges: gpd.GeoDataFrame,
         id_col: str,
         attribute_cols: list = [],
         use_location: bool = False,
-        snap_offset: float = 10e-6,
         **kwargs,
     ):
         """This component add edges or edges attributes to the graph model
@@ -268,40 +388,28 @@ class NowcastingModel(Model):
 
         """
 
-        # parameter handling
-        if attribute_cols is None:
-            attribute_cols = []
-
-        if edges_fn is None:
-            logger.error("edges_fn must be specified.")
-
-        self.logger.info(f"Adding edges to graph.")
-        edges = self._get_geodataframe(edges_fn)
-
         assert set([id_col] + attribute_cols).issubset(
             edges.columns
         ), f"id and/or attribute cols {[id_col] + attribute_cols} do not exist in {edges.columns}"
 
         if use_location is True:
-            self.logger.debug(f"Adding new edges.")
+            self.logger.info(f"Adding new edges.")
             attribute_cols = ["geometry"] + attribute_cols
             self._graphmodel = graph.add_edges_with_id(
-                self._graphmodel, edges=edges, id_col=id_col, snap_offset=snap_offset
+                self._graphmodel, edges=edges, id_col=id_col
             )
 
         if len(attribute_cols) > 0:
-            self.logger.debug(f"updating edges attributes")
+            self.logger.info(f"Adding new edges attributes")
             self._graphmodel = graph.update_edges_attributes(
                 self._graphmodel, edges=edges[[id_col] + attribute_cols], id_col=id_col
             )
 
-        self.logger.debug(f"Adding edges vector to staticgeoms as {edges_fn}.")
-        self.set_staticgeoms(edges, edges_fn)
 
     def _setup_nodes(
         self,
-        nodes_fn: str,
-        id_col: str,
+        nodes: gpd.GeoDataFrame,
+        id_col: str | None = None,
         attribute_cols: list = [],
         use_location: bool = False,
         snap_offset: float = 10e-6,
@@ -332,17 +440,6 @@ class NowcastingModel(Model):
 
         """
 
-        # parameter handling
-        if attribute_cols is None:
-            attribute_cols = []
-
-        if nodes_fn is None:
-            logger.error("nodes_fn must be specified.")
-
-        self.logger.info(f"Adding nodes to graph.")
-
-        nodes = self._get_geodataframe(nodes_fn)
-
         assert set([id_col] + attribute_cols).issubset(
             nodes.columns
         ), f"id and/or attribute cols {[id_col] + attribute_cols} do not exist in {nodes.columns}"
@@ -360,8 +457,6 @@ class NowcastingModel(Model):
                 self._graphmodel, nodes=nodes[[id_col] + attribute_cols], id_col=id_col
             )
 
-        self.logger.debug(f"Adding nodes vector to staticgeoms as {nodes_fn}.")
-        self.set_staticgeoms(nodes, nodes_fn)
 
     def _get_geodataframe(self, path_or_key: str) -> gpd.GeoDataFrame:
         """Function to get geodataframe.
@@ -399,7 +494,7 @@ class NowcastingModel(Model):
             pass
 
         if funcs is not None:
-            self.logger.debug(f"updating {path_or_key}")
+            self.logger.debug(f"updating {path_or_key} GeoDataFrame vector data")
 
             for k, v in funcs.items():
                 try:
@@ -432,6 +527,7 @@ class NowcastingModel(Model):
 
     def setup_subgraph(
         self,
+        G:nx.Graph = None,
         subgraph_fn: str = None,
         edge_query: str = None,
         edge_target: str = None,
@@ -492,8 +588,12 @@ class NowcastingModel(Model):
             )
             G = self._graphmodel.copy()
         else:
-            self.logger.debug(f"will apply on graph itself.")
-            G = self._graphmodel.copy()
+            if G is None:
+                self.logger.debug(f"will apply on graph itself.")
+                G = self._graphmodel.copy()
+            else:
+                self.logger.debug(f"will apply on given graph.")
+                pass
 
         SG = G.copy()
 
@@ -674,6 +774,7 @@ class NowcastingModel(Model):
                         for i in edge_width
                     ],
                 )
+        return SG
 
     def _find_target_nodes(self, G:nx.DiGraph, node_query=None, edges_query=None):
         """helper to find the target nodes"""
@@ -1111,6 +1212,100 @@ class NowcastingModel(Model):
                     node_color=range(len(ind)),
                 )
                 nx.draw_networkx_edges(ind, pos_ind, alpha=0.3)
+
+    def setup_pruning(self,
+                      G: nx.Graph = None,
+                      subgraph_fn:str = None,
+                      edge_prune_query:str = None,
+                      node_prune_query:str = None,
+                      **kwargs):
+        """function to prune the 1D flow network"""
+
+        # create the initial graph
+        G = self._io_subgraph(subgraph_fn, G, 'r')
+
+        # query those to be pruned
+        SG = self.setup_subgraph(G, edge_query=edge_prune_query,
+                                 # report ='plot sg for pruning'
+                                 )
+        # TODO what if the query applies to node, how do I know?
+
+        # query those to be remained
+        DG = graph.find_difference(G, SG)
+
+        # get the root nodes of the pruned branches
+        tree_roots = [n for n in DG if n in SG]
+
+        # add a super node
+        SG.add_edges_from([(n, -1) for n in tree_roots])
+
+        # apply DAG to get summed information for root nodes
+        SG_dag = self.setup_dag(SG, weight = 'geom_length', targets = [-1],
+                                # report = "plot dag for pruning"
+                                )
+
+        # add SG_dag node loads back to tree roots in SG
+        SG.remove_edges_from([(n, -1) for n in tree_roots])
+        loads = ["nnodes"]
+        for load in loads:
+            from collections import Counter
+            tree_roots_load_org = Counter({n[0]:n[-1] for n in SG.nodes(data = load) if n[-1] is not None })
+            tree_roots_load_dag = Counter({n[0]:n[-1] for n in SG_dag.nodes(data = load) if n[-1] is not None })
+            tree_roots_load_total = tree_roots_load_org + tree_roots_load_dag
+            nx.set_node_attributes(DG, tree_roots_load_total, load)
+        # TODO add geometry handling here
+
+        # draw to see
+        plt.figure()
+        pos = {xy: xy for xy in G.nodes}
+        nx.draw_networkx_nodes(SG, pos)
+        nx.draw_networkx_nodes(G, pos, nodelist  = tree_roots, node_color = 'r')
+
+        return None
+
+    def _io_subgraph(self, subgraph_fn, G:nx.Graph = None, mode = 'r'):
+        """function to assit the graph_fn handeling for subgraph"""
+
+        # read
+        if mode == 'r':
+            if G is None:
+                if subgraph_fn is None:
+                    self.logger.debug(
+                        f"using main graph."
+                    )
+                    G = self._graphmodel.copy()
+                else:
+                    if subgraph_fn in self._subgraphmodels:
+                        self.logger.debug(
+                            f"using subgraph instance {subgraph_fn}. "
+                        )
+                        G = self._subgraphmodels[subgraph_fn]
+                    else:
+                        self.logger.warning(
+                            f"using main model as subgraph instance {subgraph_fn}. "
+                        )
+                        G = self._graphmodel.copy()
+            else:
+                if subgraph_fn is None:
+                    self.logger.warning(
+                        f"using given graph."
+                    )
+                    pass
+
+        # write
+        # else:
+        # if subgraph_fn in self._subgraphmodels:
+        #     self.logger.warning(
+        #         f"using given model and overwriting subgraph instance {subgraph_fn}. "
+        #     )
+        #     self._subgraphmodels[subgraph_fn] = G
+        # else:
+        #     self.logger.warning(
+        #         f"using given model and creating subgraph instance {subgraph_fn}. "
+        #     )
+        #     self._subgraphmodels[subgraph_fn] = G
+        return G
+
 
     ## I/O
     def read(self):

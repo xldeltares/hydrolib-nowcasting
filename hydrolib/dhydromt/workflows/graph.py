@@ -12,6 +12,8 @@ import random
 from networkx.drawing.nx_agraph import graphviz_layout
 import community
 
+from delft3dfmpy.core.geometry import find_nearest_branch
+
 from ..workflows.helper import *
 
 logger = logging.getLogger(__name__)
@@ -24,14 +26,6 @@ __all__ = []
 
 def add_edges_with_id(G: nx.Graph, edges: gpd.GeoDataFrame, id_col: str, snap_offset: float = 1e-6) -> nx.Graph():
     """Return graph with edges and edges ids"""
-
-    # preprocess edges
-    # precision correction
-    edges = reduce_gdf_precision(edges, rounding_precision=1e-8)  # recommned to be larger than e-8
-    # snap branches
-    edges = snap_branch_ends(edges, offset=snap_offset)
-    logger.debug(
-            f"Performing snapping at edges ends.")
 
     for index, row in edges.iterrows():
         from_node = row.geometry.coords[0]
@@ -111,6 +105,65 @@ def update_edges_attributes(
 
     return G_updated
 
+def find_edge_ids_by_snapping(
+        G: nx.Graph,
+        edges: gpd.GeoDataFrame,
+        snap_offset: float = 1,
+        snap_method: str = 'overall',
+) -> gpd.GeoDataFrame:
+    """This function adds "id" to edges GeoDataFrame"""
+
+    # graph
+    _ = gpd.GeoDataFrame(nx.to_pandas_edgelist(G).set_index("id"))
+
+    # wrapper to use delft3dfmpy function to find "branch_id"
+    _ = _.rename({"id":"branch_id"}).assign(branchType = None)
+    find_nearest_branch(
+        _, edges, method = snap_method, maxdist = snap_offset, move_geometries = True,
+    )
+
+    # rename "branch_id" to "edge_id"
+    edges_with_ids = edges.rename(columns = {"branch_id": "_id"})
+
+    return edges_with_ids
+
+
+def find_node_ids_by_snapping(
+        G: nx.Graph,
+        nodes: gpd.GeoDataFrame,
+        snap_offset: float = 1,
+        snap_method: str = 'overall',
+) -> gpd.GeoDataFrame:
+    """This function adds "id" to nodes GeoDataFrame"""
+
+    # graph
+    G_nodes = gpd.GeoDataFrame(
+        {
+            "geometry": [Point(p) for p in G.nodes],
+            "node_id": [f"{p[0]:.6f}_{p[1]:.6f}" for p in G.nodes],
+            "_id": G.nodes(data = "id"),
+        }
+    ).set_index("node_id")
+
+    # nodes
+    nodes.loc[:, "node_id"] = [f"{x:.6f}_{y:.6f}" for x,y in zip(nodes.geometry.x, nodes.geometry.y)]
+    nodes = nodes.set_index("node_id")
+
+    # map user nodes to derived nodes
+    if set(nodes.index).issubset(set(G_nodes.index)):
+        # check if 1-to-1 match
+        G_nodes_new = G_nodes.join(nodes.drop(columns="geometry"))
+    else:
+        # use snap_nodes_to_nodes function to find "node_id"
+        G_nodes_new = snap_nodes_to_nodes(nodes, G_nodes, snap_offset)
+        logger.debug("performing snap nodes to graph nodes")
+
+
+    # assign id from graph to nodes
+    nodes = nodes.join(G_nodes_new["_id"])
+
+    return nodes
+
 
 def update_nodes_attributes(
     G: nx.Graph,
@@ -146,6 +199,8 @@ def update_nodes_attributes(
         nx.set_node_attributes(G, dict, c)
 
     return G
+
+
 
 
 # process graph
@@ -261,6 +316,14 @@ def find_predecessors(G:nx.DiGraph, n, inclusive = True):
     if inclusive:
         predecessors = predecessors + [n]
     return predecessors
+
+def find_difference(G, H):
+    """function to find the difference between G and H (G-H) based on edges
+    replace :py:meth:`~nx.difference()` """
+    c = G.copy()
+    c.remove_edges_from(H.edges)
+    c.remove_nodes_from(list(nx.isolates(c)))
+    return c
 
 # plot graph
 
