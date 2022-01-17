@@ -15,6 +15,7 @@ import pandas as pd
 import geopandas as gpd
 from shapely.geometry import box
 import xarray as xr
+from collections import Counter
 
 import hydromt
 from hydromt.models.model_api import Model
@@ -63,6 +64,7 @@ class NowcastingModel(Model):
         )
 
         # model specific
+        self._meta = {}
         self._graphmodel = None
         self._subgraphmodels = {}
 
@@ -873,14 +875,18 @@ class NowcastingModel(Model):
                 _G = G.copy()
                 G = G.to_undirected()
 
-        # check if graph is fully connected
-        if len([_ for _ in nx.connected_components(G)]) > 1:
-            raise TypeError("Cannot apply dag on disconnected graph.")
-
         # check targets of the dag
         if isinstance(target_query, str):
             targets = self._find_target_nodes(_G, target_query, target_query)
         self.logger.debug(f"{len(targets)} targets are selected")
+
+        # check if graph is fully connected
+        if len([_ for _ in nx.connected_components(G)]) > 1:
+            # try adding super nodes
+            G.add_edges_from([(n, -1) for n in targets])
+            self.logger.debug(f"connecting targets to supernode")
+            if len([_ for _ in nx.connected_components(G)]) > 1:
+                raise TypeError("Cannot apply dag on disconnected graph.")
 
         # check algorithm of the dag
         algorithm = "dijkstra"
@@ -959,12 +965,16 @@ class NowcastingModel(Model):
         edegs_loads = [l for l in loads if l in edges_attribute]
 
         for s, t in _.edges():
-            upstream_nodes = list(nx.dfs_postorder_nodes(_, t))
+            # fixed loads
+            upstream_nodes = list(nx.dfs_postorder_nodes(_, t)) # exclusive
             upstream_edges = list(G.subgraph(upstream_nodes).edges())
+            DAG[t][s].update({"upstream_nodes": upstream_nodes, "upstream_edges": upstream_edges})
+            DAG.nodes[s].update({"upstream_nodes": upstream_nodes, "upstream_edges": upstream_edges})
             nnodes = len(upstream_nodes)
             nedges = len(upstream_edges)
             DAG[t][s].update({"nnodes": nnodes, "nedges": nedges})
             DAG.nodes[s].update({"nnodes": nnodes, "nedges": nedges})
+            # customised nodes
             sumload_from_nodes = 0
             sumload_from_edges = 0
             for l in loads:
@@ -1218,48 +1228,77 @@ class NowcastingModel(Model):
                       subgraph_fn:str = None,
                       edge_prune_query:str = None,
                       node_prune_query:str = None,
+                      report:str = None,
                       **kwargs):
         """function to prune the 1D flow network"""
 
         # create the initial graph
         G = self._io_subgraph(subgraph_fn, G, 'r')
 
-        # query those to be pruned
-        SG = self.setup_subgraph(G, edge_query=edge_prune_query,
+        # pruned graph
+        PG = self.setup_subgraph(G, edge_query=edge_prune_query,node_query=node_prune_query
                                  # report ='plot sg for pruning'
                                  )
-        # TODO what if the query applies to node, how do I know?
 
-        # query those to be remained
-        DG = graph.find_difference(G, SG)
+        # remained graph
+        RG = graph.find_difference(G, PG)
 
-        # get the root nodes of the pruned branches
-        tree_roots = [n for n in DG if n in SG]
+        # graph connections pruned graph
+        tree_roots = [n for n in RG if n in PG]
+        # PG.add_edges_from([(n, -1) for n in tree_roots])
+        # PG.remove_edges_from([(n, -1) for n in tree_roots])
 
-        # add a super node
-        SG.add_edges_from([(n, -1) for n in tree_roots])
-
-        # apply DAG to get summed information for root nodes
-        SG_dag = self.setup_dag(SG, weight = 'geom_length', targets = [-1],
-                                # report = "plot dag for pruning"
+        # apply DAG to pruned graph -  get summed information for root nodes
+        PG_dag = self.setup_dag(PG, weight = 'geom_length', targets = tree_roots,
+                                report = "plot dag for pruning"
                                 )
 
-        # add SG_dag node loads back to tree roots in SG
-        SG.remove_edges_from([(n, -1) for n in tree_roots])
+        # add PG_dag node loads back to tree roots in SG
         loads = ["nnodes"]
         for load in loads:
-            from collections import Counter
-            tree_roots_load_org = Counter({n[0]:n[-1] for n in SG.nodes(data = load) if n[-1] is not None })
-            tree_roots_load_dag = Counter({n[0]:n[-1] for n in SG_dag.nodes(data = load) if n[-1] is not None })
+            tree_roots_load_org = Counter({n[0]:n[-1] for n in PG.nodes(data = load) if n[-1] is not None })
+            tree_roots_load_dag = Counter({n[0]:n[-1] for n in PG_dag.nodes(data = load) if n[-1] is not None })
             tree_roots_load_total = tree_roots_load_org + tree_roots_load_dag
-            nx.set_node_attributes(DG, tree_roots_load_total, load)
-        # TODO add geometry handling here
+            nx.set_node_attributes(RG, tree_roots_load_total, load)
+        # TODO add geometry handling here --> # do we need a mapping csv
+
+        # write into graph
+        self._io_subgraph(subgraph_fn, G, 'w')
 
         # draw to see
-        plt.figure()
-        pos = {xy: xy for xy in G.nodes}
-        nx.draw_networkx_nodes(SG, pos)
-        nx.draw_networkx_nodes(G, pos, nodelist  = tree_roots, node_color = 'r')
+        if report:
+            # plot xy
+            plt.figure(figsize=(8, 8))
+            plt.title(report, wrap=True, loc="left")
+            plt.axis("off")
+            pos = {xy: xy for xy in G.nodes()}
+
+            # base
+            nx.draw(
+                G,
+                pos=pos,
+                node_size=0,
+                with_labels=False,
+                arrows=False,
+                node_color="gray",
+                edge_color="silver",
+                width=0.5,
+            )
+            nx.draw(
+                RG,
+                pos=pos,
+                node_size=0,
+                with_labels=False,
+                arrows=False,
+                node_color="gray",
+                edge_color="gray",
+                width=1,
+            )
+
+
+            size = list(dict(RG.nodes(data = "nnodes")).values())
+            size = [0 if v is None else v for v in size]
+            nx.draw_networkx_nodes(RG, pos, node_size = size, node_color = 'r')
 
         return None
 
@@ -1281,29 +1320,30 @@ class NowcastingModel(Model):
                         )
                         G = self._subgraphmodels[subgraph_fn]
                     else:
-                        self.logger.warning(
-                            f"using main model as subgraph instance {subgraph_fn}. "
+                        self.logger.debug(
+                            f"using main model{subgraph_fn}. "
                         )
                         G = self._graphmodel.copy()
             else:
-                if subgraph_fn is None:
-                    self.logger.warning(
-                        f"using given graph."
+                self.logger.debug(
+                        f"no graph is read from subgraph_fn."
                     )
-                    pass
 
         # write
-        # else:
-        # if subgraph_fn in self._subgraphmodels:
-        #     self.logger.warning(
-        #         f"using given model and overwriting subgraph instance {subgraph_fn}. "
-        #     )
-        #     self._subgraphmodels[subgraph_fn] = G
-        # else:
-        #     self.logger.warning(
-        #         f"using given model and creating subgraph instance {subgraph_fn}. "
-        #     )
-        #     self._subgraphmodels[subgraph_fn] = G
+        if mode == 'w':
+            if G is None:
+                raise ValueError("no graph to write to subgraph_fn")
+            else:
+                if subgraph_fn in self._subgraphmodels:
+                    self.logger.warning(
+                        f"using given model and overwriting subgraph instance {subgraph_fn}. "
+                    )
+                    self._subgraphmodels[subgraph_fn] = G
+                else:
+                    self.logger.warning(
+                        f"using given model and creating subgraph instance {subgraph_fn}. "
+                    )
+                    self._subgraphmodels[subgraph_fn] = G
         return G
 
 
@@ -1325,12 +1365,13 @@ class NowcastingModel(Model):
             return
         if self.config:  # try to read default if not yet set
             self.write_config()  # FIXME: config now isread from default, modified and saved temporaryly in the models folder --> being read by dfm and modify?
+        if self._graphmodel:
+            self.write_graphmodel()
         if self._staticmaps:
             self.write_staticmaps()
         if self._staticgeoms:
             self.write_staticgeoms()
-        if self._graphmodel:
-            self.write_graphmodel()
+
 
     def read_staticmaps(self):
         """Read staticmaps at <root/?/> and parse to xarray Dataset"""
