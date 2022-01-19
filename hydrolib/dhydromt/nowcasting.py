@@ -16,6 +16,7 @@ import geopandas as gpd
 from shapely.geometry import box
 import xarray as xr
 from collections import Counter
+import itertools
 
 import hydromt
 from hydromt.models.model_api import Model
@@ -1228,12 +1229,74 @@ class NowcastingModel(Model):
                       subgraph_fn:str = None,
                       edge_prune_query:str = None,
                       node_prune_query:str = None,
+                      algorithm:str = "simple",
+                      max_depth:int = None,
                       report:str = None,
                       **kwargs):
         """function to prune the 1D flow network"""
 
+
+        # automatic pruning of tree
+        G = self._graphmodel.copy()
+        G_neutral = G.to_undirected()
+        G_positive = G.copy()
+        G_negative = G_positive.reverse()
+
+
+        # get all bifurcation node
+        bifurcations = [n for n in G.nodes if G.degree[n] > 2]
+
+        can_be_pruned = []
+        prune_depth = {}
+        for n in bifurcations:
+
+            # get its upstream as a subgraph (based on edges not nodes)
+            n_predecessors = nx.dfs_predecessors(G_negative, n)
+            if len(n_predecessors) > 1:
+                subgraph_edges = []
+                for nn in n_predecessors:
+                    _ = list(itertools.chain(*list(G_neutral.edges(nn))))
+                    subgraph_edges.append(_)
+                subgraph_nodes=list(set(sum(subgraph_edges,[])))
+                subgraph = G_negative.subgraph(subgraph_nodes)
+
+                # check if its upstream subgraph is arborescence
+                if nx.is_arborescence(subgraph):
+                    graph.plot_graphviz(subgraph)
+                    can_be_pruned.append(n)
+                    prune_depth[n] = len(n_predecessors)
+
+        self.logger.debug("nodes and depths available for automatic pruning are: {prune_depth} ")
+
+        if max_depth is not None:
+            prune_depth = {k:v for k,v in prune_depth.keys() if v <= max_depth}
+            can_be_pruned = prune_depth.keys()
+
+
+        # # number of path from bifurcation to downstream
+        # num_of_paths_to_targets = {k:0 for k in bifurcations}
+        # # for each source -> outlet
+        # for b in bifurcations:
+        #     if nx.has_path(G_positive, b, -1):
+        #         paths = nx.all_simple_paths(G_positive, source=b, target=-1)
+        #         paths = [path for path in paths]
+        #         num_of_paths_to_targets[b] = len(paths)
+
+        plt.figure()
+        # graph.plot_xy(G)
+        # pos = {xy: xy for xy in G.nodes()}
+        graph.plot_graphviz(G)
+        pos = graphviz_layout(G, prog="dot", args="")
+        nx.draw_networkx_nodes(G, pos, nodelist = bifurcations, node_size=10, node_color='r')
+        nx.draw_networkx_nodes(G, pos, nodelist=can_be_pruned, node_size=20, node_color='g',
+                               node_shape='o')
+        nx.draw_networkx_labels(G, pos, {b:b for b in bifurcations})
+
+
+        # selective pruning, based on query
         # create the initial graph
         G = self._io_subgraph(subgraph_fn, G, 'r')
+
 
         # pruned graph
         PG = self.setup_subgraph(G, edge_query=edge_prune_query,node_query=node_prune_query
