@@ -11,6 +11,7 @@ import contextily as ctx
 import random
 from networkx.drawing.nx_agraph import graphviz_layout
 import community
+import itertools
 
 from delft3dfmpy.core.geometry import find_nearest_branch
 
@@ -210,20 +211,14 @@ def query_graph_edges_attributes(G, id_col: str = "id", edge_query: str = None):
     """This function queries the graph by selecting only the edges specified in edge_query"""
 
     if edge_query is None:
-        G_query = G
-
+        G_query = G.copy()
     else:
         _graph_df = nx.to_pandas_edgelist(G).set_index(id_col)
-        graph_df = _graph_df.query(edge_query)
+        keep_df = _graph_df.query(edge_query)
 
-        if len(graph_df) != 0:
-            G_query = nx.from_pandas_edgelist(
-                graph_df.reset_index(),
-                source="source",
-                target="target",
-                edge_attr=True,
-                create_using=type(G),
-            )
+        if len(keep_df) > 0:
+            G_query = G.edge_subgraph([(row.source, row.target) for row in keep_df.itertuples()]).copy()
+
         else:
             raise ValueError("edges_query results in nothing left")
 
@@ -277,6 +272,42 @@ def louvain_partition(G:nx.Graph):
     return community.best_partition(G)
 
 
+def sort_ids(G:nx.Graph):
+    """Function to sort the ids of the graph.
+    if there are no ids for the nodes, the ids will be generated based on the geometry
+   """
+    if set(dict(G.nodes(data='id')).values()) == {None}:
+        nx.set_node_attributes(G, {p: f"{p[0]:.6f}_{p[1]:.6f}" for p in G.nodes}, 'id')
+
+    return G
+
+
+
+
+def sort_ends(G:nx.Graph):
+    """Function to sort the ends of the graph.
+
+        Arguments
+        ---------
+        G: nx.Graph
+            Networkx Graph
+
+        Returns
+        -------
+        G: nx.Graph
+            Networkx Graph with node attribute '_type'
+    """
+    if isinstance(G, nx.DiGraph):
+        endnodes = {n: 'endnode' for n in G.nodes if (G.degree[n] == 1 and G.out_degree[n] == 0)}
+        startnodes = {n: 'startnode' for n in G.nodes if (G.degree[n] == 1 and G.in_degree[n] == 0)}
+        nx.set_node_attributes(G, endnodes, '_type')
+        nx.set_node_attributes(G, startnodes, '_type')
+    elif isinstance(G, nx.Graph):
+        endnodes = {n: 'endnode' for n in G.nodes if G.degree[n] == 1}
+        nx.set_node_attributes(G, endnodes, '_type')
+    return G
+
+
 def sort_direction(G:nx.DiGraph) -> nx.DiGraph:
     """Function sort the start end direction of the graph and obtain start and end nodes.
 
@@ -290,10 +321,10 @@ def sort_direction(G:nx.DiGraph) -> nx.DiGraph:
     G: nx.DiGraph
         Directional Graph with node attributes endnodes and startnodes"""
 
-    endnodes = {n: True for n in G.nodes if (G.degree[n] == 1 and G.out_degree[n] == 0)}
-    startnodes = {n: True for n in G.nodes if (G.degree[n] == 1 and G.in_degree[n] == 0)}
-    nx.set_node_attributes(G, endnodes, 'endnodes')
-    nx.set_node_attributes(G, startnodes, 'startnodes')
+    endnodes = {n: 'endnode' for n in G.nodes if (G.degree[n] == 1 and G.out_degree[n] == 0)}
+    startnodes = {n: 'startnode' for n in G.nodes if (G.degree[n] == 1 and G.in_degree[n] == 0)}
+    nx.set_node_attributes(G, endnodes, '_type')
+    nx.set_node_attributes(G, startnodes, '_type')
     return G
 
 
@@ -622,4 +653,45 @@ def validate_1dnetwork_flowpath(
 
     return None
 
+
+
+def get_arborescence(G:nx.DiGraph):
+    """function to get arborescence from Digraph
+    This function will loop through all bifurcation node and check if its predecessors forms a arborescence.
+    If yes, _arborescence = True is assigned to nodes and edges.
+    See :py:meth:`networkx.algorithms.tree.recognition.is_arborescence` for more.
+    """
+
+    if not isinstance(G, nx.DiGraph):
+        raise TypeError("Must be a DiGraph")
+
+    # prepare
+    G_neutral = G.to_undirected()
+    G_positive = G.copy()
+    G_negative = G_positive.reverse()
+
+    # get all bifurcation node
+    bifurcations = [n for n in G.nodes if G.degree[n] > 2]
+
+    # get edges that can be pruned and its load
+    for n in bifurcations:
+
+        # get its upstream as a subgraph (based on edges not nodes)
+        n_predecessors = nx.dfs_predecessors(G_negative, n)
+        if len(n_predecessors) > 1:
+            subgraph_edges = []
+            for nn in n_predecessors:
+                _ = list(itertools.chain(*list(G_neutral.edges(nn))))
+                subgraph_edges.append(_)
+            subgraph_nodes = list(set(sum(subgraph_edges, [])))
+
+            subgraph = G_negative.subgraph(subgraph_nodes)
+            subgraph_edges = list(subgraph.edges())
+
+            # check if its upstream subgraph is arborescence
+            if nx.is_arborescence(subgraph):
+                nx.set_node_attributes(G, {k: True for k in subgraph_nodes}, '_arborescence')
+                nx.set_edge_attributes(G, {e: True for e in subgraph_edges}, '_arborescence')
+
+    return G
 

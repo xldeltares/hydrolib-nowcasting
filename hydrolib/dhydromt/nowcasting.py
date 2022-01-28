@@ -357,6 +357,13 @@ class NowcastingModel(Model):
         else:
             raise ValueError("Failed due to zero geometry.")
 
+    def _sort_graph(self, G:nx.Graph):
+        """methods to validate graph"""
+        # check if both node and edge has id
+        G = graph.sort_ids(G)
+        G = graph.sort_ends(G)
+        return G
+
 
     def _setup_edges(
         self,
@@ -407,6 +414,8 @@ class NowcastingModel(Model):
             self._graphmodel = graph.update_edges_attributes(
                 self._graphmodel, edges=edges[[id_col] + attribute_cols], id_col=id_col
             )
+
+        self._graphmodel = self._sort_graph(self._graphmodel)
 
 
     def _setup_nodes(
@@ -459,6 +468,8 @@ class NowcastingModel(Model):
             self._graphmodel = graph.update_nodes_attributes(
                 self._graphmodel, nodes=nodes[[id_col] + attribute_cols], id_col=id_col
             )
+
+        self._graphmodel = self._sort_graph(self._graphmodel)
 
 
     def _get_geodataframe(self, path_or_key: str) -> gpd.GeoDataFrame:
@@ -1092,7 +1103,6 @@ class NowcastingModel(Model):
             SG = self._graphmodel.copy()
         SG_targets = [n for n in SG.nodes if SG.out_degree[n] == 0]
 
-
         # start partition
         partition = {n: -1 for n in G.nodes}
         partition_edges = {e: -1 for e in G.edges}
@@ -1108,7 +1118,7 @@ class NowcastingModel(Model):
         elif algorithm == 'flowpath':
             assert isinstance(SG, nx.DiGraph), f"algorithm {algorithm} can only be applied on directional graph"
             SG = graph.sort_direction(SG)
-            endnodes = [n[0] for n in SG.nodes(data = 'endnodes') if n[-1] is not None]
+            endnodes = [n[0] for n in SG.nodes(data = '_type') if n[-1] == 'endnode']
             partition.update({nn:i for i,n in enumerate(endnodes) for nn in graph.find_predecessors(SG, n)})
             partition_edges.update({(s, t): partition[s] for s, t in partition_edges if partition[s] == partition[t]})
             logger.info(f"algorithm {algorithm} is applied. Note that flowpath might be duplicated.")
@@ -1227,106 +1237,132 @@ class NowcastingModel(Model):
     def setup_pruning(self,
                       G: nx.Graph = None,
                       subgraph_fn:str = None,
+                      algorithm: str = "simple",
                       edge_prune_query:str = None,
                       node_prune_query:str = None,
-                      algorithm:str = "simple",
-                      max_depth:int = None,
+                      weight:str = None,
+                      loads: list = [],
+                      max_loads:float = [],
                       report:str = None,
                       **kwargs):
-        """function to prune the 1D flow network"""
+        """This component prepares the pruning the 1D flow network based on aggregation
 
+        Parameters
+        ----------
+        G: nx.Graph, optional (default = None)
+            Networkx graph to allow the function being called by another function.
+            If None, the network graph from self._graphmodel or self._subgraphmodels[subgraph_fn] will be used
+        subgraph_fn : str, optional (default - None)
+            Name of the subgraph instance.
+            If None, self._graphmodel will be used for partition; the function will update the self._graphmodel
+            if String and new, self._graphmodel will be used for partition; the function will create the instance in self._subgraphmodels
+            if String and old, self._subgraphmodels[subgraph_fn] will be used for partition; the function will update the instance in self._subgraphmodels[subgraph_fn]
+        algorithm : str, optional (default - simple)
+            Algorithm to derive partitions from subgraph. Options: ['simple', 'auto']
+            testing methods:
+            "simple" : based on user specifie.  The algorithm will prune the edges/nodes based on edge_prune_query and node_prune_query.
+            "auto" : based on analysis of network. The algrithm will prune the arborescence of the tree. A threshold can be set to determine whether an arborescence is small enough to be pruned.
+        weight : None or string, optional (default = None)
+            Weight used for shortest path. Used in setup_dag.
+            If None, every edge has weight/distance/cost 1.
+            If a string, use this edge attribute as the edge weight.
+            Any edge attribute not present defaults to 1.
+        loads : None or list of strings, optional (default - None)
+            Load used from edges/nodes attributes. Used in setup_dag.
+            If None, every node/edge has a load equal to the total number of nodes upstream (nnodes), and number of edges upstream (nedges).
+            If a list, use the attributes in the list as load.
+            The attribute can be either from edges or from nodes.
+            Any attributes that are not present defaults to 0.
+        """
 
-        # automatic pruning of tree
-        G = self._graphmodel.copy()
-        G_neutral = G.to_undirected()
-        G_positive = G.copy()
-        G_negative = G_positive.reverse()
-
-
-        # get all bifurcation node
-        bifurcations = [n for n in G.nodes if G.degree[n] > 2]
-
-        can_be_pruned = []
-        prune_depth = {}
-        for n in bifurcations:
-
-            # get its upstream as a subgraph (based on edges not nodes)
-            n_predecessors = nx.dfs_predecessors(G_negative, n)
-            if len(n_predecessors) > 1:
-                subgraph_edges = []
-                for nn in n_predecessors:
-                    _ = list(itertools.chain(*list(G_neutral.edges(nn))))
-                    subgraph_edges.append(_)
-                subgraph_nodes=list(set(sum(subgraph_edges,[])))
-                subgraph = G_negative.subgraph(subgraph_nodes)
-
-                # check if its upstream subgraph is arborescence
-                if nx.is_arborescence(subgraph):
-                    graph.plot_graphviz(subgraph)
-                    can_be_pruned.append(n)
-                    prune_depth[n] = len(n_predecessors)
-
-        self.logger.debug("nodes and depths available for automatic pruning are: {prune_depth} ")
-
-        if max_depth is not None:
-            prune_depth = {k:v for k,v in prune_depth.keys() if v <= max_depth}
-            can_be_pruned = prune_depth.keys()
-
-
-        # # number of path from bifurcation to downstream
-        # num_of_paths_to_targets = {k:0 for k in bifurcations}
-        # # for each source -> outlet
-        # for b in bifurcations:
-        #     if nx.has_path(G_positive, b, -1):
-        #         paths = nx.all_simple_paths(G_positive, source=b, target=-1)
-        #         paths = [path for path in paths]
-        #         num_of_paths_to_targets[b] = len(paths)
-
-        plt.figure()
-        # graph.plot_xy(G)
-        # pos = {xy: xy for xy in G.nodes()}
-        graph.plot_graphviz(G)
-        pos = graphviz_layout(G, prog="dot", args="")
-        nx.draw_networkx_nodes(G, pos, nodelist = bifurcations, node_size=10, node_color='r')
-        nx.draw_networkx_nodes(G, pos, nodelist=can_be_pruned, node_size=20, node_color='g',
-                               node_shape='o')
-        nx.draw_networkx_labels(G, pos, {b:b for b in bifurcations})
-
-
-        # selective pruning, based on query
         # create the initial graph
         G = self._io_subgraph(subgraph_fn, G, 'r')
 
+        # check algorithm
+        if algorithm is not None:
+            if algorithm not in ("simple", "auto"):
+                raise ValueError(f"algorithm not supported: {algorithm}")
+        else:
+            algorithm = "simple"
+            self.logger.info(f"default algorithm {algorithm} is applied")
 
-        # pruned graph
-        PG = self.setup_subgraph(G, edge_query=edge_prune_query,node_query=node_prune_query
+        # check prune query
+        if algorithm == "simple":
+            # check queries
+            if all(v is None for v in [edge_prune_query, node_prune_query]):
+                raise ValueError("must specify one of the following: edge_prune_query OR node_prune_query")
+            if max_loads is not None:
+                self.logger.debug(f"will ignore: max_loads")
+        elif algorithm == "auto":
+            if any(v is not None for v in [edge_prune_query, node_prune_query]):
+                self.logger.debug(f"will ignore: edge_prune_query, node_prune_query")
+
+        # check loads
+        if loads is not None:
+            if isinstance(loads, str):
+                loads = list(loads)
+        else:
+            loads = []
+
+        # check max_loads
+        if max_loads is not None:
+            if isinstance(max_loads, str):
+                max_loads = list(max_loads)
+                if len(loads) != len(max_loads):
+                    raise ValueError(f"max_loads must have the same length as loads")
+        else:
+            max_loads = []
+
+        # get pruned graph
+        self.logger.debug(f"getting pruned graph based on algorithm = {algorithm}")
+        if algorithm == 'auto':
+            _PG = graph.get_arborescence(G)
+            PG = self.setup_subgraph(_PG, edge_query='_arborescence == True'
                                  # report ='plot sg for pruning'
                                  )
 
+        elif algorithm == 'simple':
+            PG = self.setup_subgraph(G, edge_query=edge_prune_query, node_query=node_prune_query
+                                     # report ='plot sg for pruning'
+                                     )
+
         # remained graph
+        self.logger.debug(f"getting remained graph based on difference")
         RG = graph.find_difference(G, PG)
 
-        # graph connections pruned graph
+        # adding loads to remained graph
+        self.logger.debug(f"adding loads to remained graph using dag search")
+
+        # graph connections pruned graph VS remained graph
         tree_roots = [n for n in RG if n in PG]
         # PG.add_edges_from([(n, -1) for n in tree_roots])
         # PG.remove_edges_from([(n, -1) for n in tree_roots])
 
         # apply DAG to pruned graph -  get summed information for root nodes
-        PG_dag = self.setup_dag(PG, weight = 'geom_length', targets = tree_roots,
-                                report = "plot dag for pruning"
+        PG_dag = self.setup_dag(PG, targets = tree_roots, loads = loads, weight = weight,
+                                # report = "plot dag for pruning"
                                 )
 
         # add PG_dag node loads back to tree roots in SG
-        loads = ["nnodes"]
+        loads = set(loads + ["nnodes", 'nedges'])
         for load in loads:
             tree_roots_load_org = Counter({n[0]:n[-1] for n in PG.nodes(data = load) if n[-1] is not None })
             tree_roots_load_dag = Counter({n[0]:n[-1] for n in PG_dag.nodes(data = load) if n[-1] is not None })
             tree_roots_load_total = tree_roots_load_org + tree_roots_load_dag
             nx.set_node_attributes(RG, tree_roots_load_total, load)
-        # TODO add geometry handling here --> # do we need a mapping csv
 
         # write into graph
-        self._io_subgraph(subgraph_fn, G, 'w')
+        self._io_subgraph(subgraph_fn, RG, 'w')
+
+        # # map arborescence to a node
+        # self.logger.debug(f"adding mapping to remained graph for missing nodes")
+        # for n in tree_roots:
+        #     uns = graph.find_predecessors(G, n, inclusive=False) # upstream nodes
+        #     ues = list(G.subgraph(uns + [n]).edges())
+        #     nx.set_node_attributes(G, {un:G.nodes[n]['id'] for un in uns}, 'mapping_id')
+        #     nx.set_edge_attributes(G, {ue:G.nodes[n]['id'] for ue in ues}, 'mapping_id')
+        #
+        # self._io_subgraph(subgraph_fn + '_mapping', G, 'w')
 
         # draw to see
         if report:
@@ -1358,12 +1394,18 @@ class NowcastingModel(Model):
                 width=1,
             )
 
+            # plot size of arborescence
+            size = list(dict(RG.nodes(data = list(loads)[0])).values())
+            size = np.array([0 if v is None else v for v in size])
+            scaled_size = np.interp(size, (size.min(), size.max()), (0, 100))
 
-            size = list(dict(RG.nodes(data = "nnodes")).values())
-            size = [0 if v is None else v for v in size]
-            nx.draw_networkx_nodes(RG, pos, node_size = size, node_color = 'r')
+            nx.draw_networkx_nodes(RG, pos, node_size = scaled_size, node_color = 'r')
 
         return None
+
+    def setup_diagram(self, subgraph_fn:str = None, **kwargs):
+        return
+
 
     def _io_subgraph(self, subgraph_fn, G:nx.Graph = None, mode = 'r'):
         """function to assit the graph_fn handeling for subgraph"""
@@ -1384,7 +1426,7 @@ class NowcastingModel(Model):
                         G = self._subgraphmodels[subgraph_fn]
                     else:
                         self.logger.debug(
-                            f"using main model{subgraph_fn}. "
+                            f"using main model. "
                         )
                         G = self._graphmodel.copy()
             else:
@@ -1505,9 +1547,24 @@ class NowcastingModel(Model):
 
         # write edges
         shp = gpd.GeoDataFrame(nx.to_pandas_edgelist(G).set_index("id"))
-        shp.drop(columns=["source", "target"]).to_file(
-            join(outdir, f"{outname}_edges.shp")
-        ) # drop them because they are tuple
+
+        # prune results need dessolving
+        # df = nx.to_pandas_edgelist(G).set_index("id")
+        # for c in df.columns:
+        #     if isinstance(type(df[c][0]), list):
+        #         df[c] = df[c].apply(lambda x: ','.join(map(str, x)))
+        #     elif isinstance(type( df[c][0]), tuple):
+        #         df[c] = df[c].apply(lambda x: '_'.join(map(str, x)))
+        #
+        # shp = gpd.GeoDataFrame(df)
+        try:
+            shp.drop(columns=["source", "target"]).to_file(
+                join(outdir, f"{outname}_edges.shp")
+            ) # drop them because they are tuple
+        except:
+            shp.drop(columns=["source", "target", "upstream_nodes", "upstream_edges"]).to_file(
+                join(outdir, f"{outname}_edges.shp")
+            )  # drop them because they are tuple
 
         # write nodes
         df = pd.DataFrame.from_dict(dict(G.nodes(data=True)), orient='index').reset_index()
@@ -1521,9 +1578,14 @@ class NowcastingModel(Model):
         else:
             shp = gpd.GeoDataFrame(
                 df, geometry=gpd.points_from_xy(df.level_0, df.level_1))
-            shp.drop(columns=["level_0", "level_1"]).to_file(
-                join(outdir, f"{outname}_nodes.shp")
-            ) # drop them because they are tuple
+            try:
+                shp.drop(columns=["level_0", "level_1"]).to_file(
+                    join(outdir, f"{outname}_nodes.shp")
+                ) # drop them because they are tuple
+            except:
+                shp.drop(columns=["level_0", "level_1", "upstream_nodes", "upstream_edges"]).to_file(
+                    join(outdir, f"{outname}_nodes.shp")
+                )  # drop them because they are tuple
 
     def read_forcing(self):
         """Read forcing at <root/?/> and parse to dict of xr.DataArray"""
