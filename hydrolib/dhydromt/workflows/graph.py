@@ -12,6 +12,7 @@ import random
 from networkx.drawing.nx_agraph import graphviz_layout
 import community
 import itertools
+import numpy as np
 
 from delft3dfmpy.core.geometry import find_nearest_branch
 
@@ -328,7 +329,7 @@ def sort_direction(G:nx.DiGraph) -> nx.DiGraph:
     return G
 
 
-def find_predecessors(G:nx.DiGraph, n, inclusive = True):
+def get_predecessors(G:nx.DiGraph, n, inclusive = True):
     """Function to find the predecessors of a node n
     See :py:meth:`~nx.bfs_predecessors()` for more information.
 
@@ -355,6 +356,67 @@ def find_difference(G, H):
     c.remove_edges_from(H.edges)
     c.remove_nodes_from(list(nx.isolates(c)))
     return c
+
+
+def contract_graph(G:nx.Graph, partition, tonodes):
+    """contract based on partition --> needs further improvements
+        TODO: harmonize with setup partition
+    """
+    ind = G.copy()
+    nx.set_node_attributes(ind, {n: {"ind_size": 1} for n in ind.nodes})
+    for part in np.unique(list(partition.values())):
+        part_nodes = [n for n in partition if partition[n] == part]
+        if part == -1:
+            # do not contract
+            pass
+        else:
+            for to_node in [n for n in part_nodes if n in tonodes]:
+                ind, targets = contract_graph_nodes(
+                    ind, part_nodes, to_node
+                )
+                ind.nodes[to_node]["ind_size"] = len(part_nodes)
+    return ind
+
+def make_dag(X: nx.DiGraph, targets: list, weight:str = None, algorithm = "dijkstra"):
+    """dag making for digraph --> needs further improvements
+    TODO: add to setup_dag
+    # test
+    # G = nx.DiGraph()
+    # G.add_edge(0,1)
+    # G.add_edge(1,2)
+    # G.add_edge(1,3)
+    # nx.draw(G)
+    # targets = [3, 2]
+    # G.add_edges_from ([(o, -1) for o in targets])
+    # nx.draw(G)
+    # X_new = nx.DiGraph()
+    # for n in G.nodes:
+    #     path = nx.shortest_path(G, n, -1,
+    #              method = algorithm)
+    #     nx.add_path(X_new, path)
+    # X_new.remove_nodes_from([-1])
+    """
+
+    X_new = nx.DiGraph()
+    X.add_edges_from ([(o, -1) for o in targets])
+    # for nodes that are reachable from target
+    for n in X.nodes:
+        path = nx.shortest_path(X, n, -1,
+                weight = weight, method = algorithm)
+        nx.add_path(X_new, path)
+
+    X_new.remove_nodes_from([-1])
+
+    # add back weights
+    for u, v, weight in X_new.edges(data=True):
+        # get the old data from X
+        xdata = X[u].get(v)
+        non_shared = set(xdata) - set(weight)
+        if non_shared:
+            # add old weights to new weights if not in new data
+            weight.update(dict((key, xdata[key]) for key in non_shared))
+
+    return X_new
 
 # plot graph
 

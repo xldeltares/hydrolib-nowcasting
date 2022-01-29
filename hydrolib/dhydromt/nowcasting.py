@@ -827,6 +827,43 @@ class NowcastingModel(Model):
 
         return targets
 
+    def _find_target_graph(self, G:nx.DiGraph, node_query=None, edges_query=None):
+        """helper to find the target nodes"""
+
+        targets = None
+
+        if all(v is None for v in [node_query,edges_query]):
+            targets = [n for n in G.nodes if G.out_degree[n] == 0]
+
+        if isinstance(edges_query, str):
+            try:
+                self.logger.debug("Finding targets in edges")
+                _target_G = graph.query_graph_edges_attributes(
+                    G,
+                    edge_query=edges_query,
+                )
+                targets = [v for u, v in _target_G.edges()]
+            except Exception as e:
+                self.logger.debug(e)
+                pass
+
+        if isinstance(node_query, str):
+            try:
+                self.logger.debug("Finding targets in nodes")
+                _target_G = graph.query_graph_nodes_attributes(
+                    G,
+                    node_query=node_query,
+                )
+                targets = [n for n in _target_G.nodes()]
+            except Exception as e:
+                self.logger.debug(e)
+                pass
+
+        if targets is None:
+            raise ValueError("could not find targets.")
+
+        return _target_G
+
 
     def setup_dag(
         self,
@@ -1056,6 +1093,7 @@ class NowcastingModel(Model):
 
     def setup_partition(
         self,
+        G: nx.Graph = None,
         subgraph_fn: str = None,
         algorithm: str = "simple",
         report: str = None,
@@ -1084,7 +1122,8 @@ class NowcastingModel(Model):
         """
 
         # get graph model
-        G = self._graphmodel.copy()
+        if G is None:
+            G = self._graphmodel.copy()
         G_targets = [n for n in G.nodes if G.out_degree[n] == 0]
 
         # get subgraph if applicable
@@ -1119,7 +1158,7 @@ class NowcastingModel(Model):
             assert isinstance(SG, nx.DiGraph), f"algorithm {algorithm} can only be applied on directional graph"
             SG = graph.sort_direction(SG)
             endnodes = [n[0] for n in SG.nodes(data = '_type') if n[-1] == 'endnode']
-            partition.update({nn:i for i,n in enumerate(endnodes) for nn in graph.find_predecessors(SG, n)})
+            partition.update({nn:i for i,n in enumerate(endnodes) for nn in graph.get_predecessors(SG, n)})
             partition_edges.update({(s, t): partition[s] for s, t in partition_edges if partition[s] == partition[t]})
             logger.info(f"algorithm {algorithm} is applied. Note that flowpath might be duplicated.")
         elif algorithm == "louvain":  # based on louvain algorithm
@@ -1161,7 +1200,7 @@ class NowcastingModel(Model):
         # ind.remove_edges_from(nx.selfloop_edges(ind))
         # induced by contracting - slower but neater
         if contracted == True:
-            ind = self._graphmodel.copy()
+            ind = G.copy()
             nx.set_node_attributes(ind, {n: {"ind_size": 1} for n in ind.nodes})
             for part in np.unique(list(partition.values())):
                 part_nodes = [n for n in partition if partition[n] == part]
@@ -1234,6 +1273,8 @@ class NowcastingModel(Model):
                 )
                 nx.draw_networkx_edges(ind, pos_ind, alpha=0.3)
 
+        return SG
+
     def setup_pruning(self,
                       G: nx.Graph = None,
                       subgraph_fn:str = None,
@@ -1305,6 +1346,7 @@ class NowcastingModel(Model):
             loads = []
 
         # check max_loads
+        # check max_loads
         if max_loads is not None:
             if isinstance(max_loads, str):
                 max_loads = list(max_loads)
@@ -1357,7 +1399,7 @@ class NowcastingModel(Model):
         # # map arborescence to a node
         # self.logger.debug(f"adding mapping to remained graph for missing nodes")
         # for n in tree_roots:
-        #     uns = graph.find_predecessors(G, n, inclusive=False) # upstream nodes
+        #     uns = graph.get_predecessors(G, n, inclusive=False) # upstream nodes
         #     ues = list(G.subgraph(uns + [n]).edges())
         #     nx.set_node_attributes(G, {un:G.nodes[n]['id'] for un in uns}, 'mapping_id')
         #     nx.set_edge_attributes(G, {ue:G.nodes[n]['id'] for ue in ues}, 'mapping_id')
@@ -1381,7 +1423,7 @@ class NowcastingModel(Model):
                 arrows=False,
                 node_color="gray",
                 edge_color="silver",
-                width=0.5,
+                width=0.2,
             )
             nx.draw(
                 RG,
@@ -1403,7 +1445,103 @@ class NowcastingModel(Model):
 
         return None
 
-    def setup_diagram(self, subgraph_fn:str = None, **kwargs):
+    def setup_diagram(self, G:nx.DiGraph = None, subgraph_fn:str = None, target_query:str = None, **kwargs):
+        """function to derive flow diagram at certain target nodes/edges (in progress)
+
+        The target nodes/edges include:
+            nodes/edges identified using target_query
+            nodes that are end nodes (out degree is 0)
+
+        Arguments
+        ---------
+        G: nx.DiGraph
+            Directional Graph
+        subgraph_fn:
+            Directional Graph node that are used as target to find predecessors
+        target_query: bool
+            Whether to include the input node in the results
+        **kwargs:
+            weight = None, for setup_dag
+            report = None, for plotting
+        """
+
+        # check arguments
+        if G is not None:
+            _G = G.copy()
+            self.logger.info(f"Performing on given graph")
+        else:
+            _G = self._io_subgraph(subgraph_fn, G, 'r')
+            self.logger.info(f"Performing on subgraph instance {subgraph_fn}")
+
+        if target_query is None:
+            raise ValueError("must specify target_query (diagram will be aggregated base don target_query)")
+
+        weight = kwargs.get("weight", None)
+
+        # 1. find target nodes/edges and put them in a graph
+        target_G = self._find_target_graph(_G, target_query, target_query)
+
+        # 2. setup a subgraph instance without the target graph
+        SG = _G.copy()
+        SG.remove_edges_from(target_G.edges)
+
+        # 3. setup a dag to delineate the upstream of the targets --> results is a dag split at target nodes
+        targets = list(set([n for n in target_G.nodes if target_G.in_degree[n] == 0] + [n for n in SG.nodes if
+                                                                                        SG.out_degree[n] == 0]))
+        G_dag = graph.make_dag(SG, targets=targets, weight=weight)
+        self._graphmodel = G_dag.copy()
+        # TODO: this method follows the flow direction specified in the DiGraph,
+        #  there fore is incapable of making correction to any flow direcitons.
+        #  to be implemented in setup_dag
+
+        # 4. setup partition --> results is a graph with partition information as attributes
+        G_part = self.setup_partition(G_dag, algorithm = 'simple')
+
+        # 5. add target graph back --> result is the graph has reconstructed connecitivity
+        G_part.add_edges_from(target_G.edges)
+
+        # 6. contract graph based on partition to form tree diagram
+        partition = pd.DataFrame.from_dict(G_part.nodes(data = 'part'))
+        partition = partition.dropna().set_index(0)
+        partition= partition.to_dict(orient='dict')[1]
+        ind = graph.contract_graph(G_part, partition = partition, tonodes = targets)
+        # TODO: improve this function in workflows, remove from setup partition
+
+        # plot
+        report = kwargs.get("report", "setup_diagram")
+
+        if report is not None:
+
+            G = G_part.copy()
+            pos_G = {xy: xy for xy in G.nodes()}
+            pos_ind = {xy: xy for xy in ind.nodes()}
+
+            graph.make_graphplot_for_targetnodes(ind, None, None, layout="graphviz")
+            plt.title(report, wrap=True, loc="left")
+
+            plt.figure(figsize=(8, 8))
+            plt.title(report, wrap=True, loc="left")
+            plt.axis("off")
+            # base
+            nx.draw(
+                G,
+                pos=pos_G,
+                node_size=0,
+                with_labels=False,
+                arrows=False,
+                node_color="gray",
+                edge_color="silver",
+                width=0.2,
+            )
+            nx.draw_networkx_nodes(
+                ind,
+                pos=pos_ind,
+                node_size=list(dict(ind.nodes(data="ind_size")).values()),
+                cmap=plt.cm.RdYlBu,
+                node_color=range(len(ind)),
+            )
+            nx.draw_networkx_edges(ind, pos_ind, alpha=0.3)
+
         return
 
 
