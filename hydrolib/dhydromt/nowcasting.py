@@ -494,8 +494,7 @@ class NowcastingModel(Model):
         # read data
         df = self.data_catalog.get_geodataframe(
             path_or_key,
-            geom=None,
-            # FIXME use geom region gives error "geopandas Invalid projection: : (Internal Proj Error: proj_create: unrecognized format / unknown name)"
+            geom=self.region.buffer(10),
         )
 
         # update columns
@@ -873,7 +872,7 @@ class NowcastingModel(Model):
         weight: str = None,
         loads: list = [],
         report: str = None,
-        use_super_target: bool = True,
+        algorithm: str = 'simple',
         **kwargs,
     ):
         """This component prepares subgraph as Directed Acyclic Graphs (dag) using shortest path
@@ -901,12 +900,13 @@ class NowcastingModel(Model):
             If a list, use the attributes in the list as load.
             The attribute can be either from edges or from nodes.
             Any attributes that are not present defaults to 0.
-        algorithm : string, optional (default = 'dijkstra')
-            The algorithm to use to compute the path.
-            Supported options: 'dijkstra', 'bellman-ford'.
+        algorithm : string, optional (default = 'simple')
+            The algorithm to use to compute the dag.
+            Supported options: 'simple', 'flowpath'.
             Other inputs produce a ValueError.
-            If `weight` is None, unweighted graph methods are used, and this
-            suggestion is ignored.
+            if 'simple', the input graph is treated as a undirected graph, the resulting graph might alter the original edges direction
+            If 'flowpath', the input graph is treated as a directed graph, the resulting graph do not alter the original edges direction.
+            Both option will have less edges. the missing edges indicates their insignificance in direction, i.e. both way are possible. # FIXME
 
         Arguments
         ----------
@@ -920,82 +920,44 @@ class NowcastingModel(Model):
         if G is None:
             G = self._graphmodel.copy()
             self.logger.debug("Apply dag on graphmodel.")
-        if isinstance(G, nx.DiGraph):
-                _G = G.copy()
-                G = G.to_undirected()
 
         # check targets of the dag
         if isinstance(target_query, str):
-            targets = self._find_target_nodes(_G, target_query, target_query)
+            targets = self._find_target_nodes(G, target_query, target_query)
         self.logger.debug(f"{len(targets)} targets are selected")
 
         # check if graph is fully connected
-        if len([_ for _ in nx.connected_components(G)]) > 1:
+        if len([_ for _ in nx.connected_components(G.to_undirected())]) > 1:
             # try adding super nodes
-            G.add_edges_from([(n, -1) for n in targets])
+            _G = G.copy()
+            _G.add_edges_from([(n, -1) for n in targets])
             self.logger.debug(f"connecting targets to supernode")
-            if len([_ for _ in nx.connected_components(G)]) > 1:
+            if len([_ for _ in nx.connected_components(_G.to_undirected())]) > 1:
                 raise TypeError("Cannot apply dag on disconnected graph.")
 
-        # check algorithm of the dag
-        algorithm = "dijkstra"
-        if algorithm not in ("dijkstra", "bellman-ford"):
+        # check algorithm of the setup
+        if algorithm not in ("simple", "flowpath"):
             raise ValueError(f"algorithm not supported: {algorithm}")
         self.logger.debug(f"Performing {algorithm}")
+
+        # check method of the dag
+        method = "dijkstra"
+        if method not in ("dijkstra", "bellman-ford"):
+            raise ValueError(f"method not supported: {method}")
+        self.logger.debug(f"Performing {method} dag")
 
         # started making dag
         DAG = nx.DiGraph()
 
         # 1. add path
         # FIXME: if don't do this step: networkx.exception.NetworkXNoPath: No path to **.
-        if use_super_target:
-            # add super target
-            _t = [-1]
-            if weight == "streetlev":
-                # FIXME temporary
-                # mirror weights at super edges
-                for w in ["geom_length", "streetlev"]:
-                    G.add_weighted_edges_from(
-                        [
-                            (
-                                t,
-                                _t[0],
-                                max(
-                                    [
-                                        k[1][w] if w in k[1] else 0
-                                        for k in G[t].items()
-                                    ]
-                                ),
-                            )
-                            for t in list(set(G.nodes) & set(targets))
-                        ],
-                        weight=w,
-                    )
-            else:
-                G.add_edges_from(
-                    [(t, _t[0]) for t in list(set(G.nodes) & set(targets))]
-                )
-        else:
-            _t = targets
-        for t in _t:
-            for n in G.nodes:
-                if n not in DAG:
-                    if weight == "streetlev":
-                        # FIXME temporary
-                        smax = max([k[1]["streetlev"] for k in G[t].items()])
-                        path = nx.shortest_path(
-                            G,
-                            n,
-                            t,
-                            weight=lambda u, v, e: 10 - smax / e["geom_length"],
-                            method=algorithm,
-                        )
-                    else:
-                        path = nx.shortest_path(
-                            G, n, t, weight=weight, method=algorithm
-                        )
-                    nx.add_path(DAG, path)
-                    DAG.remove_node(t)
+        if algorithm == 'simple':
+            self.logger.info("dag based on method simple. undirected graph will be used. ")
+            G = G.to_undirected()
+            DAG = graph.make_dag(G, targets=targets, weight=weight, drop_unreachable=False)
+        elif algorithm == 'flowpath':
+            self.logger.info("dag based on method flowpath. unreachable path will be dropped. ")
+            DAG = graph.make_dag(G, targets=targets, weight=weight, drop_unreachable=True)
 
         # 2. add back weights
         for u, v, new_d in DAG.edges(data=True):
@@ -1299,9 +1261,11 @@ class NowcastingModel(Model):
             if String and new, self._graphmodel will be used for partition; the function will create the instance in self._subgraphmodels
             if String and old, self._subgraphmodels[subgraph_fn] will be used for partition; the function will update the instance in self._subgraphmodels[subgraph_fn]
         algorithm : str, optional (default - simple)
+            # FIXME: after creating dag, some edges are missing, also the edge attributes. Therefore, the loads are imcomplete. will not have influence if the loads are applied on nodes.
             Algorithm to derive partitions from subgraph. Options: ['simple', 'auto']
             testing methods:
             "simple" : based on user specifie.  The algorithm will prune the edges/nodes based on edge_prune_query and node_prune_query.
+            "flowpath": based on direction defined for edges.
             "auto" : based on analysis of network. The algrithm will prune the arborescence of the tree. A threshold can be set to determine whether an arborescence is small enough to be pruned.
         weight : None or string, optional (default = None)
             Weight used for shortest path. Used in setup_dag.
@@ -1321,7 +1285,7 @@ class NowcastingModel(Model):
 
         # check algorithm
         if algorithm is not None:
-            if algorithm not in ("simple", "auto"):
+            if algorithm not in ("simple", "auto", "flowpath"):
                 raise ValueError(f"algorithm not supported: {algorithm}")
         else:
             algorithm = "simple"
@@ -1346,7 +1310,6 @@ class NowcastingModel(Model):
             loads = []
 
         # check max_loads
-        # check max_loads
         if max_loads is not None:
             if isinstance(max_loads, str):
                 max_loads = list(max_loads)
@@ -1363,7 +1326,7 @@ class NowcastingModel(Model):
                                  # report ='plot sg for pruning'
                                  )
 
-        elif algorithm == 'simple':
+        else:
             PG = self.setup_subgraph(G, edge_query=edge_prune_query, node_query=node_prune_query
                                      # report ='plot sg for pruning'
                                      )
@@ -1377,24 +1340,75 @@ class NowcastingModel(Model):
 
         # graph connections pruned graph VS remained graph
         tree_roots = [n for n in RG if n in PG]
-        # PG.add_edges_from([(n, -1) for n in tree_roots])
-        # PG.remove_edges_from([(n, -1) for n in tree_roots])
+        tree_roots_edges = {}
+        for n in tree_roots:
+            keep = []
+            dn = [e[2] for e in RG.edges(data = 'id') if e[0] == n]
 
-        # apply DAG to pruned graph -  get summed information for root nodes
-        PG_dag = self.setup_dag(PG, targets = tree_roots, loads = loads, weight = weight,
-                                # report = "plot dag for pruning"
-                                )
+            if len(dn) > 1:
+                up = [e[2] for e in RG.edges(data = 'id') if e[1] == n]
+                if len(up) > 1:
+                    print(n)
+                else:
+                    keep = up
+            else:
+                keep = dn
+            tree_roots_edges[n] = keep
 
-        # add PG_dag node loads back to tree roots in SG
-        loads = set(loads + ["nnodes", 'nedges'])
+        if algorithm == 'flowpath':
+            # no dag is performed
+            PG_dag = self.setup_dag(PG, targets=tree_roots, loads=loads, weight=weight,
+                                    report="plot dag for pruning", algorithm='flowpath')
+        else:
+            # apply DAG to pruned graph -  get summed information for root nodes
+            PG_dag = self.setup_dag(PG, targets = tree_roots, loads = loads, weight = weight,
+                                     report = "plot dag for pruning", algorithm = 'simple')
+
+        # add new id to PG nodes
+        new_id = {}
+        for o in tree_roots:
+            for n in PG.nodes():
+                try:
+                    if nx.has_path(PG_dag,n,o):
+                        new_id[n] = tree_roots_edges[o]
+                except nx.exception.NodeNotFound:
+                    pass
+
+        new_id = {k:v[0] if len(v) > 0 else None for k,v in new_id.items() }
+        nx.set_node_attributes(PG, new_id, 'new_id')
+        # add new id to PG edges
+        new_id = {}
+        for o in tree_roots:
+            for e in PG.edges():
+                try:
+                    if nx.has_path(PG_dag,e[0],o):
+                        new_id[e] = tree_roots_edges[o]
+                except nx.exception.NodeNotFound:
+                    pass
+
+        new_id = {k:v[0] if len(v) > 0 else None for k,v in new_id.items() }
+        nx.set_edge_attributes(PG, new_id, 'new_id')
+
+        # add PG_dag loads back to tree roots in RG
+        # add back missing edges (adding missing edges for weight, might alter flow path indeed)
+        for e in PG.edges:
+            if e not in PG_dag.edges():
+                if e not in PG_dag.reverse().edges():
+                    PG_dag.add_edges_from(e, **PG.edges[e[0], e[1]])
+        # sum loads of the arborescence
         for load in loads:
-            tree_roots_load_org = Counter({n[0]:n[-1] for n in PG.nodes(data = load) if n[-1] is not None })
-            tree_roots_load_dag = Counter({n[0]:n[-1] for n in PG_dag.nodes(data = load) if n[-1] is not None })
-            tree_roots_load_total = tree_roots_load_org + tree_roots_load_dag
-            nx.set_node_attributes(RG, tree_roots_load_total, load)
+            for o in tree_roots:
+                arborescence_graph = PG_dag.subgraph(graph.get_predecessors(PG_dag, o, inclusive=True))
+                load_from_nodes = sum([e[-1] for e in arborescence_graph.edges(data=load) if e[-1] is not None])
+                loads_from_edges = sum([n[-1] for n in arborescence_graph.nodes(data=load) if n[-1] is not None])
+                nx.set_node_attributes(RG, {o: load_from_nodes + loads_from_edges}, load)
+                nx.set_node_attributes(RG, {o: len(arborescence_graph.nodes())}, 'nnodes')
+                nx.set_node_attributes(RG, {o: len(arborescence_graph.edges())}, 'nedges')
+        loads = set(loads + ["nnodes", "nedges"])
 
         # write into graph
-        self._io_subgraph(subgraph_fn, RG, 'w')
+        self._io_subgraph(subgraph_fn + '_RG', RG, 'w')
+        self._io_subgraph(subgraph_fn + '_PG', PG, 'w')
 
         # # map arborescence to a node
         # self.logger.debug(f"adding mapping to remained graph for missing nodes")
@@ -1461,7 +1475,7 @@ class NowcastingModel(Model):
         target_query: bool
             Whether to include the input node in the results
         **kwargs:
-            weight = None, for setup_dag
+            weight = None, for setup_dag # FIXME
             report = None, for plotting
         """
 
@@ -1594,8 +1608,8 @@ class NowcastingModel(Model):
     def read(self):
         """Method to read the complete model schematization and configuration from file."""
         self.logger.info(f"Reading model data from {self.root}")
-        self.read_config()
-        self.read_staticmaps()
+        # self.read_config()
+        # self.read_staticmaps()
         self.read_staticgeoms()
         self.read_graphmodel()
 
@@ -1658,8 +1672,9 @@ class NowcastingModel(Model):
         if not self._write:
             # start fresh in read-only mode
             self._graphmodel = None
-        fn = join(self.root, "graphmodel.gpickle")
+        fn = join(self.root, "graph", "graphmodel.gpickle")
         self._graphmodel = nx.read_gpickle(fn)
+
 
     def write_graphmodel(self):
         """write graphmodel at <root/?/> in model ready format"""
@@ -1686,7 +1701,7 @@ class NowcastingModel(Model):
         # write edges
         shp = gpd.GeoDataFrame(nx.to_pandas_edgelist(G).set_index("id"))
 
-        # prune results need dessolving
+         # prune results need dessolving
         # df = nx.to_pandas_edgelist(G).set_index("id")
         # for c in df.columns:
         #     if isinstance(type(df[c][0]), list):

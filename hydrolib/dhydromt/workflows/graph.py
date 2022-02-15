@@ -377,7 +377,7 @@ def contract_graph(G:nx.Graph, partition, tonodes):
                 ind.nodes[to_node]["ind_size"] = len(part_nodes)
     return ind
 
-def make_dag(X: nx.DiGraph, targets: list, weight:str = None, algorithm = "dijkstra"):
+def make_dag(G: nx.DiGraph, targets: list, weight:str = None, algorithm = "dijkstra", drop_unreachable = False, logger = logger):
     """dag making for digraph --> needs further improvements
     TODO: add to setup_dag
     # test
@@ -397,9 +397,18 @@ def make_dag(X: nx.DiGraph, targets: list, weight:str = None, algorithm = "dijks
     # X_new.remove_nodes_from([-1])
     """
 
+    # copy
+    X = G.copy()
+
     X_new = nx.DiGraph()
     X.add_edges_from ([(o, -1) for o in targets])
     # for nodes that are reachable from target
+    if drop_unreachable:
+        XX = X.reverse()
+        sub_network = X.subgraph(nx.dfs_tree(XX, -1).nodes)
+        X = sub_network.copy()
+        logger.debug("drop unreachable nodes")
+
     for n in X.nodes:
         path = nx.shortest_path(X, n, -1,
                 weight = weight, method = algorithm)
