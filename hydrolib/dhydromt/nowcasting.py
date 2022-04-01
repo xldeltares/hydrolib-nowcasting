@@ -1344,15 +1344,19 @@ class NowcastingModel(Model):
         for n in tree_roots:
             keep = []
             dn = [e[2] for e in RG.edges(data = 'id') if e[0] == n]
-
-            if len(dn) > 1:
-                up = [e[2] for e in RG.edges(data = 'id') if e[1] == n]
-                if len(up) > 1:
-                    print(n)
+            if len(dn) == 0:
+                # try upstream
+                up = [e[2] for e in RG.edges(data='id') if e[1] == n]
+                if len(up) == 0:
+                    pass
+                elif len(up) > 1:
+                    keep = [up[0]] # just pick one
                 else:
                     keep = up
-            else:
+            elif len(dn) == 1:
                 keep = dn
+            elif len(dn) > 1:
+                keep = [dn[0]]  # just pick one
             tree_roots_edges[n] = keep
 
         if algorithm == 'flowpath':
