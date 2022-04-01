@@ -1369,6 +1369,7 @@ class NowcastingModel(Model):
                                      report = "plot dag for pruning", algorithm = 'simple')
 
         # add new id to PG nodes
+        self.logger.debug(f"adding new id to nodes")
         new_id = {}
         for o in tree_roots:
             for n in PG.nodes():
@@ -1380,7 +1381,9 @@ class NowcastingModel(Model):
 
         new_id = {k:v[0] if len(v) > 0 else None for k,v in new_id.items() }
         nx.set_node_attributes(PG, new_id, 'new_id')
+
         # add new id to PG edges
+        self.logger.debug(f"adding new id to edges")
         new_id = {}
         for o in tree_roots:
             for e in PG.edges():
@@ -1395,11 +1398,14 @@ class NowcastingModel(Model):
 
         # add PG_dag loads back to tree roots in RG
         # add back missing edges (adding missing edges for weight, might alter flow path indeed)
+        self.logger.debug(f"adding missing edges")
         for e in PG.edges:
             if e not in PG_dag.edges():
                 if e not in PG_dag.reverse().edges():
                     PG_dag.add_edges_from(e, **PG.edges[e[0], e[1]])
+
         # sum loads of the arborescence
+        self.logger.debug(f"adding loads")
         for load in loads:
             for o in tree_roots:
                 arborescence_graph = PG_dag.subgraph(graph.get_predecessors(PG_dag, o, inclusive=True))
