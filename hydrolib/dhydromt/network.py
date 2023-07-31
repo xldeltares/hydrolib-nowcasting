@@ -18,7 +18,6 @@ import pyproj
 import xarray as xr
 from hydromt import gis_utils, io, raster
 from hydromt.models.model_api import Model
-from rasterio.warp import transform_bounds
 from shapely.geometry import box
 
 from workflows import *
@@ -897,14 +896,19 @@ class NetworkModel(Model):
             Other inputs produce a ValueError.
             if 'simple', the input graph is treated as a undirected graph, the resulting graph might alter the original edges direction
             If 'flowpath', the input graph is treated as a directed graph, the resulting graph do not alter the original edges direction.
+            If 'meijer18'
             Both option will have less edges. the missing edges indicates their insignificance in direction, i.e. both way are possible. # FIXME
 
         Arguments
-        ----------
+        ---------
         use_super_target : bool
             whether to add a super target at the ends of all targets.
             True if the weight of DAG exist for all edges.
             False if the weight of DAG also need to consider attribute specified for targets.
+
+        See Also
+        --------
+        self._setup_dag
 
         """
         # convert Digraph to Graph
@@ -917,14 +921,82 @@ class NetworkModel(Model):
             targets = self._find_target_nodes(G, target_query, target_query)
         self.logger.debug(f"{len(targets)} targets are selected")
 
-        # check if graph is fully connected
-        if len([_ for _ in nx.connected_components(G.to_undirected())]) > 1:
-            # try adding super nodes
-            _G = G.copy()
-            _G.add_edges_from([(n, -1) for n in targets])
-            self.logger.debug(f"connecting targets to supernode")
-            if len([_ for _ in nx.connected_components(_G.to_undirected())]) > 1:
-                raise TypeError("Cannot apply dag on disconnected graph.")
+        # remove connected components without targets
+        _remain_nodes = set()
+        for comp in nx.connected_components(G.to_undirected()):
+            if not any(comp.intersection(targets)):
+                self.logger.warning(
+                    f"Removing nodes disconnected from targets: {comp}."
+                )
+            else:
+                _remain_nodes.update(comp)
+        G = G.subgraph(_remain_nodes)
+
+        # for each connected component with a target
+        for comp in nx.connected_components(G.to_undirected()):
+            _graph = G.subgraph(comp).copy()
+            _targets = comp.intersection(targets)
+            self._setup_dag(
+                G=_graph,
+                targets=_targets,
+                weight=weight,
+                loads=loads,
+                report=report,
+                algorithm=algorithm,
+            )
+
+    def _setup_dag(
+        self,
+        G: nx.Graph = None,
+        targets=None,
+        weight: str = None,
+        loads: list = [],
+        report: str = None,
+        algorithm: str = "simple",
+        **kwargs,
+    ):
+        """This component prepares subgraph as Directed Acyclic Graphs (dag) using shortest path
+        step 1: add a supernode to subgraph (representing graph - subgraph)
+        step 2: use shortest path to prepare dag edges (source: node in subgraph; target: super node)
+
+        in progress
+
+        Parameters
+        ----------
+        G : nx.Graph
+        targets : None or String or list, optional (default = None)
+            DAG super targets.
+            If None, a target node will be any node with out_degree == 0.
+            If a string, use this to query part of graph as a super target node.
+            If a list, use targets as a list of target nodes.
+        weight : None or string, optional (default = None)
+            Weight used for shortest path.
+            If None, every edge has weight/distance/cost 1.
+            If a string, use this edge attribute as the edge weight.
+            Any edge attribute not present defaults to 1.
+        loads : None or list of strings, optional (default - None)
+            Load used from edges/nodes attributes.
+            If None, every node/edge has a load equal to the total number of nodes upstream (nnodes), and number of edges upstream (nedges).
+            If a list, use the attributes in the list as load.
+            The attribute can be either from edges or from nodes.
+            Any attributes that are not present defaults to 0.
+        algorithm : string, optional (default = 'simple')
+            The algorithm to use to compute the dag.
+            Supported options: 'simple', 'flowpath'.
+            Other inputs produce a ValueError.
+            if 'simple', the input graph is treated as a undirected graph, the resulting graph might alter the original edges direction
+            If 'flowpath', the input graph is treated as a directed graph, the resulting graph do not alter the original edges direction.
+            If 'meijer18'
+            Both option will have less edges. the missing edges indicates their insignificance in direction, i.e. both way are possible. # FIXME
+
+        Arguments
+        ----------
+        use_super_target : bool
+            whether to add a super target at the ends of all targets.
+            True if the weight of DAG exist for all edges.
+            False if the weight of DAG also need to consider attribute specified for targets.
+
+        """
 
         # check algorithm of the setup
         if algorithm not in ("simple", "flowpath"):
@@ -939,6 +1011,12 @@ class NetworkModel(Model):
 
         # started making dag
         DAG = nx.DiGraph()
+
+        # try adding super nodes
+        G.add_edges_from([(n, -1) for n in targets])
+        self.logger.debug(f"connecting targets to supernode")
+        if len([_ for _ in nx.connected_components(G.to_undirected())]) > 1:
+            raise TypeError("Cannot apply dag on disconnected graph.")
 
         # 1. add path
         # FIXME: if don't do this step: networkx.exception.NetworkXNoPath: No path to **.
@@ -957,6 +1035,12 @@ class NetworkModel(Model):
             DAG = graph.make_dag(
                 G, targets=targets, weight=weight, drop_unreachable=True
             )
+        elif algorithm == "ddijkstra":
+            self.logger.info(
+                "dag based on method Meijer et al. (2018). unreachable path will be dropped. "
+            )
+            # FIXME placeholder
+            # DAG = graph.make_dag_meijer18()
 
         # 2. add back weights
         for u, v, new_d in DAG.edges(data=True):
@@ -1810,13 +1894,15 @@ class NetworkModel(Model):
         ).reset_index()
         if len(df) == 0:  # no attribute
             df = pd.DataFrame(dict(G.nodes(data=True)).keys())
-            shp = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df[0], df[1]), crs = self.crs)
+            shp = gpd.GeoDataFrame(
+                df, geometry=gpd.points_from_xy(df[0], df[1]), crs=self.crs
+            )
             shp.drop(columns=[0, 1]).to_file(
                 join(outdir, f"{outname}_nodes.geojson")
             )  # drop them because they are tuple
         else:
             shp = gpd.GeoDataFrame(
-                df, geometry=gpd.points_from_xy(df.level_0, df.level_1), crs = self.crs
+                df, geometry=gpd.points_from_xy(df.level_0, df.level_1), crs=self.crs
             )
             try:
                 shp.drop(columns=["level_0", "level_1"]).to_file(
